@@ -16,23 +16,43 @@ import io
 # ==============================================================================
 try:
     from openai import OpenAI
-    from duckduckgo_search import DDGS
-    API_AVAILABLE = True
+    OPENAI_AVAILABLE = True
 except ImportError:
-    API_AVAILABLE = False
+    OPENAI_AVAILABLE = False
+
+try:
+    from duckduckgo_search import DDGS
+    DDGS_AVAILABLE = True
+except ImportError:
+    DDGS_AVAILABLE = False
+
+try:
+    import anthropic
+    ANTHROPIC_AVAILABLE = True
+except ImportError:
+    ANTHROPIC_AVAILABLE = False
+
+API_AVAILABLE = OPENAI_AVAILABLE and DDGS_AVAILABLE
 
 # --- קונפיגורציה ---
 ADMIN_USERNAME = "admin_ism"
 ADMIN_PASSWORD = "123"
 
-# קריאת מפתח OpenRouter מ-Streamlit Secrets
-if "OPENROUTER_API_KEY" in st.secrets:
-    AI_API_KEY = st.secrets["OPENROUTER_API_KEY"]
-else:
-    # מפתח דמה למקרה שאין סודות (ה-AI לא יעבוד בלי הגדרה)
-    AI_API_KEY = "PLACEHOLDER"
+def _get_secret(key, default=""):
+    """קורא מפתח מ-st.secrets בבטחה, גם כשלא קיים קובץ secrets.toml כלל."""
+    try:
+        return st.secrets.get(key, default)
+    except Exception:
+        return default
+
+# קריאת מפתח OpenRouter מ-Streamlit Secrets (אם קיים)
+AI_API_KEY = _get_secret("OPENROUTER_API_KEY", "PLACEHOLDER") or "PLACEHOLDER"
 
 AI_MODEL_NAME = "google/gemma-4-31b-it:free"
+
+# מודל Claude (Anthropic) - משמש כסוכן AI חלופי (איכות גבוהה, בתשלום)
+ANTHROPIC_MODEL_NAME = "claude-sonnet-5"
+ANTHROPIC_EFFORT = "medium"
 
 # נתוני ברירת מחדל
 DEFAULT_FACTORS = [
@@ -46,110 +66,236 @@ SYMBOLS = ['V', 'A', 'X', 'O']
 # I. פונקציות עיצוב ותצוגה (UI/UX - Premium Styling)
 # ==============================================================================
 def apply_advanced_styling():
-    """מזריק CSS מתקדם לתיקון RTL, פונטים יוקרתיים וצבעים."""
+    """מזריק CSS מתקדם לתיקון RTL, פונטים יוקרתיים, צבעים ועיצוב פרימיום."""
     st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;700;900&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;500;700;900&display=swap');
+
+:root {
+    --brand-900: #1E3A8A;
+    --brand-700: #1E40AF;
+    --brand-600: #2563EB;
+    --brand-500: #3B82F6;
+    --brand-100: #EFF6FF;
+    --brand-50: #F8FAFF;
+    --accent: #7C3AED;
+    --surface: #ffffff;
+    --border: #E2E8F0;
+    --text-main: #1E293B;
+    --text-muted: #64748B;
+}
+
 html, body, [class*="css"] {
     font-family: 'Heebo', 'Segoe UI', sans-serif;
     direction: rtl;
     text-align: right;
 }
+
+.stApp {
+    background: radial-gradient(circle at 15% 0%, #eef2ff 0%, #f8fafc 35%, #f1f5f9 100%);
+}
+
 .stDataFrame, code, .stCodeBlock, .stJson, .stMetricValue, .js-plotly-plot {
     font-family: 'Times New Roman', Times, serif !important;
     direction: ltr !important;
     text-align: left !important;
 }
+
 h1 {
-    color: #1E3A8A;
+    background: linear-gradient(90deg, var(--brand-900), var(--accent));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
     font-family: 'Heebo', sans-serif;
     font-weight: 900;
     text-align: right;
-    border-bottom: 2px solid #eee;
-    padding-bottom: 10px;
+    padding-bottom: 12px;
     font-size: 3rem !important;
+    letter-spacing: -0.5px;
 }
+
 h2, h3 {
-    color: #1E40AF;
+    color: var(--brand-700);
     font-weight: 700;
     text-align: right;
 }
+
+h4 {
+    color: var(--text-main);
+    font-weight: 700;
+}
+
+/* --- כרטיסי תוכן כלליים (st.container(border=True)) --- */
+[data-testid="stVerticalBlockBorderWrapper"] {
+    background: var(--surface);
+    border: 1px solid var(--border) !important;
+    border-radius: 16px !important;
+    box-shadow: 0 6px 18px rgba(15,23,42,0.06);
+}
+
+/* --- Sidebar --- */
 [data-testid="stSidebar"] {
     text-align: right;
-    background-color: #f8fafc;
-    border-left: 1px solid #e2e8f0;
+    background: linear-gradient(180deg, #0F172A 0%, #1E293B 100%);
+    border-left: 1px solid #0f172a;
 }
+[data-testid="stSidebar"] * {
+    color: #E2E8F0 !important;
+}
+[data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 {
+    color: #F8FAFC !important;
+    background: none !important;
+    -webkit-text-fill-color: #F8FAFC !important;
+}
+[data-testid="stSidebar"] .stAlert {
+    background-color: rgba(59,130,246,0.15) !important;
+    border: 1px solid rgba(59,130,246,0.35);
+}
+
+/* --- כפתורים --- */
 .stButton button {
     width: 100%;
-    border-radius: 8px;
+    border-radius: 10px;
     font-weight: bold;
     font-size: 18px;
-    background-color: #2563EB;
+    background: linear-gradient(135deg, var(--brand-600), var(--accent));
     color: white;
     border: none;
-    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-    transition: 0.3s;
-    padding: 0.6rem;
+    box-shadow: 0 3px 8px rgba(37,99,235,0.25);
+    transition: 0.25s ease;
+    padding: 0.65rem;
 }
 .stButton button:hover {
-    background-color: #1d4ed8;
+    filter: brightness(1.08);
     transform: translateY(-2px);
-    box-shadow: 0 4px 6px rgba(0,0,0,0.15);
+    box-shadow: 0 8px 16px rgba(37,99,235,0.3);
 }
-.stTextInput label, .stTextArea label, .stSelectbox label {
-    font-size: 1.1rem;
+.stButton button:active {
+    transform: translateY(0px);
+}
+.stDownloadButton button {
+    width: 100%;
+    border-radius: 10px;
+    font-weight: bold;
+    background: linear-gradient(135deg, #059669, #10B981);
+    color: white;
+    border: none;
+    box-shadow: 0 3px 8px rgba(5,150,105,0.25);
+}
+.stDownloadButton button:hover {
+    filter: brightness(1.08);
+    transform: translateY(-2px);
+}
+
+.stTextInput label, .stTextArea label, .stSelectbox label, .stNumberInput label {
+    font-size: 1.05rem;
     font-weight: 600;
     color: #334155;
     text-align: right;
 }
+.stTextInput input, .stTextArea textarea, .stNumberInput input {
+    border-radius: 10px !important;
+    border: 1px solid var(--border) !important;
+}
+.stTextInput input:focus, .stTextArea textarea:focus {
+    border-color: var(--brand-500) !important;
+    box-shadow: 0 0 0 3px rgba(59,130,246,0.15) !important;
+}
+
 div[data-testid="metric-container"] {
-    background-color: #ffffff;
-    border: 1px solid #e2e8f0;
-    padding: 15px;
-    border-radius: 10px;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+    background: linear-gradient(160deg, #ffffff, #f8fafc);
+    border: 1px solid var(--border);
+    padding: 18px;
+    border-radius: 14px;
+    box-shadow: 0 4px 10px rgba(15,23,42,0.05);
     text-align: center;
 }
+
 .stRadio > label {
     float: right;
     font-weight: bold;
     font-size: 1.1rem;
     margin-bottom: 10px;
+    color: var(--brand-700);
 }
 div[role="radiogroup"] {
     direction: ltr;
     justify-content: flex-end;
     gap: 15px;
+    flex-wrap: wrap;
 }
 div[role="radiogroup"] label {
-    background: #eff6ff;
+    background: var(--brand-100);
     padding: 8px 25px;
     border-radius: 20px;
     border: 1px solid #bfdbfe;
     font-family: 'Times New Roman', serif;
     font-weight: bold;
     font-size: 20px;
-    color: #1e3a8a;
+    color: var(--brand-900);
     cursor: pointer;
     transition: 0.2s;
 }
 div[role="radiogroup"] label:hover {
     background: #dbeafe;
-    border-color: #2563eb;
+    border-color: var(--brand-600);
+    transform: translateY(-1px);
 }
+
 .stAlert {
     direction: rtl;
-    border-radius: 10px;
-    font-size: 1.1rem;
+    border-radius: 12px;
+    font-size: 1.05rem;
+    box-shadow: 0 2px 6px rgba(15,23,42,0.04);
 }
-button[data-baseweb="tab"] {
-    font-size: 1.2rem;
+
+/* --- טאבים --- */
+div[data-testid="stTabs"] button[data-baseweb="tab"] {
+    font-size: 1.15rem;
     font-weight: bold;
+    border-radius: 10px 10px 0 0;
+    color: var(--text-muted);
 }
+div[data-testid="stTabs"] button[aria-selected="true"] {
+    color: var(--brand-700) !important;
+    border-bottom: 3px solid var(--brand-600) !important;
+}
+
+/* --- כרטיס כניסה (Login) --- */
+.hero-title {
+    text-align: center;
+    font-size: 3.2rem;
+    font-weight: 900;
+    background: linear-gradient(90deg, var(--brand-900), var(--accent));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    margin-bottom: 0;
+}
+.hero-subtitle {
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 1.3rem;
+    font-weight: 400;
+    margin-top: 4px;
+}
+.login-card-badge {
+    display: inline-block;
+    font-weight: 700;
+    font-size: 1.05rem;
+    padding: 6px 16px;
+    border-radius: 999px;
+    margin-bottom: 14px;
+}
+.badge-admin { background: #EDE9FE; color: #5B21B6; }
+.badge-expert { background: #DCFCE7; color: #14532D; }
+
+/* --- צ'אט --- */
 div[data-testid="stChatMessage"] {
     direction: rtl !important;
     text-align: right !important;
     unicode-bidi: plaintext;
+    border-radius: 14px;
 }
 div[data-testid="stChatMessage"] .stMarkdown,
 div[data-testid="stChatMessage"] p {
@@ -235,6 +381,24 @@ def init_session_state():
         st.session_state['AI_LOG'] = []
     if 'TOPIC' not in st.session_state:
         st.session_state['TOPIC'] = ""
+    if 'ANTHROPIC_API_KEY' not in st.session_state:
+        st.session_state['ANTHROPIC_API_KEY'] = _get_secret('ANTHROPIC_API_KEY', '')
+    if 'AI_PROVIDER' not in st.session_state:
+        # אם מוגדר מפתח Anthropic ב-Secrets, זהו יהיה ספק ברירת המחדל
+        st.session_state['AI_PROVIDER'] = 'anthropic' if st.session_state['ANTHROPIC_API_KEY'] else 'openrouter'
+
+def is_ai_ready():
+    """בודק האם ספק ה-AI הנבחר כרגע מוגדר ומוכן לשימוש."""
+    provider = st.session_state.get('AI_PROVIDER', 'openrouter')
+    if provider == 'anthropic':
+        return ANTHROPIC_AVAILABLE and bool(st.session_state.get('ANTHROPIC_API_KEY'))
+    return OPENAI_AVAILABLE and DDGS_AVAILABLE and AI_API_KEY != "PLACEHOLDER"
+
+def ai_provider_label():
+    provider = st.session_state.get('AI_PROVIDER', 'openrouter')
+    if provider == 'anthropic':
+        return f"Anthropic — {ANTHROPIC_MODEL_NAME} (effort: {ANTHROPIC_EFFORT})"
+    return f"OpenRouter — {AI_MODEL_NAME}"
 
 # ==============================================================================
 # III. לוגיקה מתמטית (The Brain)
@@ -392,25 +556,78 @@ def solve_conflicts_and_finalize(ssim, conflicts):
 # ==============================================================================
 def _ddg_search(query, max_results=4):
     """חיפוש אינטרנטי חינמי דרך DuckDuckGo."""
+    if not DDGS_AVAILABLE:
+        return []
     try:
         with DDGS() as ddgs:
             return list(ddgs.text(query, max_results=max_results))
     except:
         return []
 
+def _call_openrouter(full_prompt, system_context):
+    """שולח בקשה למודל החינמי דרך OpenRouter (Gemma)."""
+    if not OPENAI_AVAILABLE:
+        raise Exception("ספריית openai לא מותקנת")
+    if AI_API_KEY == "PLACEHOLDER":
+        raise Exception("לא הוגדר מפתח OpenRouter (OPENROUTER_API_KEY) ב-Secrets")
+
+    client = OpenAI(api_key=AI_API_KEY, base_url="https://openrouter.ai/api/v1")
+    messages = [
+        {"role": "system", "content": system_context},
+        {"role": "user", "content": full_prompt}
+    ]
+
+    for attempt in range(3):
+        try:
+            response = client.chat.completions.create(
+                model=AI_MODEL_NAME,
+                messages=messages,
+                temperature=0.7,
+                max_tokens=3000
+            )
+            return response.choices[0].message.content
+        except Exception:
+            if attempt == 2:
+                raise
+            time.sleep(2)
+
+def _call_anthropic(full_prompt, system_context):
+    """שולח בקשה ל-Claude Sonnet 5 (Anthropic) כסוכן AI לאיכות גבוהה."""
+    if not ANTHROPIC_AVAILABLE:
+        raise Exception("ספריית anthropic לא מותקנת (הוסף 'anthropic' ל-requirements.txt)")
+
+    api_key = st.session_state.get('ANTHROPIC_API_KEY', '')
+    if not api_key:
+        raise Exception("לא הוזן מפתח API של Anthropic. הזן אותו בהגדרות המודל בטאב 'הגדרות שאלון'.")
+
+    client = anthropic.Anthropic(api_key=api_key)
+
+    for attempt in range(3):
+        try:
+            response = client.messages.create(
+                model=ANTHROPIC_MODEL_NAME,
+                max_tokens=3000,
+                system=system_context,
+                output_config={"effort": ANTHROPIC_EFFORT},
+                messages=[{"role": "user", "content": full_prompt}]
+            )
+            return "".join(b.text for b in response.content if b.type == "text")
+        except Exception:
+            if attempt == 2:
+                raise
+            time.sleep(2)
+
 def call_ai_unified(prompt, system_context="", use_search=False):
     """
     פונקציית-העל היחידה לכל קריאות ה-AI באפליקציה.
+    מנתבת לספק שנבחר (OpenRouter החינמי או Claude Sonnet 5 של Anthropic).
     מחזירה: (תשובה, רשימת מקורות)
     """
-    if not API_AVAILABLE:
-        raise Exception("ספריות openai/duckduckgo לא מותקנות")
-    
-    client = OpenAI(api_key=AI_API_KEY, base_url="https://openrouter.ai/api/v1")
-    
+    provider = st.session_state.get('AI_PROVIDER', 'openrouter')
+
     full_prompt = prompt
     citations = []
-    
+
     if use_search:
         results = _ddg_search(f"{system_context} {prompt[:150]}", max_results=4)
         search_ctx = "\n\nמקורות מהאינטרנט:\n"
@@ -420,24 +637,12 @@ def call_ai_unified(prompt, system_context="", use_search=False):
                 citations.append(r.get('href'))
         full_prompt = f"{search_ctx}\n\n---\n\n{prompt}"
 
-    messages = [
-        {"role": "system", "content": system_context},
-        {"role": "user", "content": full_prompt}
-    ]
-    
-    for attempt in range(3):
-        try:
-            response = client.chat.completions.create(
-                model=AI_MODEL_NAME,
-                messages=messages,
-                temperature=0.7,
-                max_tokens=3000
-            )
-            return response.choices[0].message.content, citations
-        except Exception as e:
-            if attempt == 2:
-                raise
-            time.sleep(2)
+    if provider == 'anthropic':
+        text = _call_anthropic(full_prompt, system_context)
+    else:
+        text = _call_openrouter(full_prompt, system_context)
+
+    return text, citations
 
 def call_ai_analysis(conflict_data, justifications, f_i, f_j):
     """פונה ל-OpenRouter להכרעה בקונפליקטים בטאב 2."""
@@ -617,40 +822,42 @@ def color_ssim_conflicts(val):
 def screen_login():
     """מסך הכניסה הראשי."""
     st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown("<h1 style='text-align: center; font-size: 3.5rem;'>🚦 מערכת ISM MICMAC Pro</h1>", unsafe_allow_html=True)
-    st.markdown("<h3 style='text-align: center; color: #64748b;'>כלי תומך החלטה לניתוח מערכתי מורכב</h3>", unsafe_allow_html=True)
-    st.markdown("---")
+    st.markdown("<div class='hero-title'>🚦 מערכת ISM MICMAC Pro</div>", unsafe_allow_html=True)
+    st.markdown("<div class='hero-subtitle'>כלי תומך החלטה לניתוח מערכתי מורכב, מונע בינה מלאכותית</div>", unsafe_allow_html=True)
+    st.markdown("<br>", unsafe_allow_html=True)
     c1, c2 = st.columns(2, gap="large")
 
     with c1:
-        st.info("🔐 **כניסת מנהל מערכת**")
-        with st.form("admin_login"):
-            u = st.text_input("שם משתמש", placeholder="admin")
-            p = st.text_input("סיסמה", type="password")
-            if st.form_submit_button("התחבר כמנהל"):
-                if u == ADMIN_USERNAME and p == ADMIN_PASSWORD:
-                    st.session_state['role'] = 'Admin'
-                    st.rerun()
-                else:
-                    st.error("פרטים שגויים")
+        with st.container(border=True):
+            st.markdown("<span class='login-card-badge badge-admin'>🔐 כניסת מנהל מערכת</span>", unsafe_allow_html=True)
+            with st.form("admin_login"):
+                u = st.text_input("שם משתמש", placeholder="admin")
+                p = st.text_input("סיסמה", type="password")
+                if st.form_submit_button("התחבר כמנהל"):
+                    if u == ADMIN_USERNAME and p == ADMIN_PASSWORD:
+                        st.session_state['role'] = 'Admin'
+                        st.rerun()
+                    else:
+                        st.error("פרטים שגויים")
 
     with c2:
-        st.success("📝 **כניסת מומחה / משתתף**")
-        st.write("אין צורך בסיסמה. מלא את פרטיך כדי להתחיל.")
-        with st.form("expert_start"):
-            name = st.text_input("שם מלא", placeholder="לדוגמה: ישראל ישראלי")
-            role = st.text_input("תפקיד / מחלקה", placeholder="לדוגמה: אגף תנועה")
-            
-            if st.form_submit_button("התחל שאלון >>"):
-                if name and role:
-                    new_id = f"Exp_{len(st.session_state['EXPERT_DATA']) + 1}"
-                    st.session_state['current_expert_id'] = new_id
-                    st.session_state['current_expert_name'] = name
-                    st.session_state['current_expert_role'] = role
-                    st.session_state['role'] = 'Expert'
-                    st.rerun()
-                else:
-                    st.error("חובה למלא שם ותפקיד!")
+        with st.container(border=True):
+            st.markdown("<span class='login-card-badge badge-expert'>📝 כניסת מומחה / משתתף</span>", unsafe_allow_html=True)
+            st.caption("אין צורך בסיסמה. מלא את פרטיך כדי להתחיל.")
+            with st.form("expert_start"):
+                name = st.text_input("שם מלא", placeholder="לדוגמה: ישראל ישראלי")
+                role = st.text_input("תפקיד / מחלקה", placeholder="לדוגמה: אגף תנועה")
+
+                if st.form_submit_button("התחל שאלון >>"):
+                    if name and role:
+                        new_id = f"Exp_{len(st.session_state['EXPERT_DATA']) + 1}"
+                        st.session_state['current_expert_id'] = new_id
+                        st.session_state['current_expert_name'] = name
+                        st.session_state['current_expert_role'] = role
+                        st.session_state['role'] = 'Expert'
+                        st.rerun()
+                    else:
+                        st.error("חובה למלא שם ותפקיד!")
 
 def screen_expert_form():
     """טופס מילוי המטריצה למומחה."""
@@ -733,8 +940,8 @@ def screen_admin_dashboard():
             st.session_state['role'] = None
             st.rerun()
         st.markdown("---")
-        status_icon = '✅' if API_AVAILABLE and AI_API_KEY != "PLACEHOLDER" else '❌'
-        st.info(f"API סטטוס: {status_icon}")
+        status_icon = '✅' if is_ai_ready() else '❌'
+        st.info(f"🤖 מודל AI פעיל: **{ai_provider_label()}**\n\nסטטוס API: {status_icon}")
         
         st.markdown("---")
         st.subheader("🛑 בקרת סימולציה")
@@ -803,8 +1010,44 @@ def screen_admin_dashboard():
                 st.error("לא ניתן לשמור רשימה ריקה.")
 
         st.markdown("---")
+        st.subheader("🤖 הגדרות מודל AI")
+        st.caption("המודל הנבחר משמש בכל מקום באפליקציה שבו מופעל AI: הכרעת קונפליקטים בין מומחים, סוכני מומחה סינתטיים (מילוי שאלון אוטומטי), הצ'אט החכם, מחולל הדוחות ובדיקת איכות הנתונים.")
+
+        provider_options = {
+            'openrouter': "🆓 OpenRouter (Gemma) — חינמי",
+            'anthropic': "⭐ Anthropic — Claude Sonnet 5 (effort: medium) — איכות גבוהה, בתשלום",
+        }
+        current_provider = st.session_state.get('AI_PROVIDER', 'openrouter')
+        selected_label = st.radio(
+            "ספק ה-AI שישמש כסוכן במענה על השאלונים",
+            options=list(provider_options.values()),
+            index=list(provider_options.keys()).index(current_provider),
+            key="ai_provider_radio",
+        )
+        st.session_state['AI_PROVIDER'] = [k for k, v in provider_options.items() if v == selected_label][0]
+
+        if st.session_state['AI_PROVIDER'] == 'anthropic':
+            if not ANTHROPIC_AVAILABLE:
+                st.error("ספריית `anthropic` אינה מותקנת. הוסף `anthropic` ל-requirements.txt והתקן מחדש.")
+            key_val = st.text_input(
+                "מפתח Anthropic API",
+                value=st.session_state.get('ANTHROPIC_API_KEY', ''),
+                type="password",
+                placeholder="sk-ant-...",
+                help="המפתח נשמר רק בזיכרון הסשן הנוכחי ואינו נשמר לקובץ. ניתן גם להגדיר אותו קבוע דרך Streamlit Secrets בשם ANTHROPIC_API_KEY.",
+                key="anthropic_key_input",
+            )
+            st.session_state['ANTHROPIC_API_KEY'] = key_val
+            if key_val:
+                st.success("✅ מפתח Anthropic הוזן. סוכן ה-AI ישתמש כעת ב-Claude Sonnet 5.")
+            else:
+                st.warning("⚠️ יש להזין מפתח API כדי להפעיל את סוכן ה-Claude.")
+        else:
+            st.info(f"סטטוס OpenRouter: {'✅ מוגדר' if AI_API_KEY != 'PLACEHOLDER' else '❌ חסר מפתח OPENROUTER_API_KEY ב-Secrets'}")
+
+        st.markdown("---")
         _show_saved_expert_recommendations()
-        
+
     # --- טאב 2: מעקב וניתוח ---
     with tab2:
         st.subheader("סטטוס משיבים")
@@ -957,8 +1200,8 @@ def screen_admin_dashboard():
         st.header("🧠 מרכז ייעוץ וסימולציה מערכתית")
         st.info("זרימת עבודה: 1️⃣ ה-AI מנתח את הגורמים וממליץ על מומחים נדרשים → 2️⃣ הפעלת סוכני AI שימלאו את השאלון במקומם, עם נימוקים מבוססי גלישה באינטרנט.")
         
-        if not API_AVAILABLE or AI_API_KEY == "PLACEHOLDER":
-            st.error("⚠️ מפתח API חסר או לא פעיל. לא ניתן להפעיל מודולים אלו.")
+        if not is_ai_ready():
+            st.error(f"⚠️ ספק ה-AI הנוכחי ({ai_provider_label()}) אינו מוגדר או שחסר מפתח API. עבור לטאב 'הגדרות שאלון' כדי להגדיר.")
         else:
             st.subheader("שלב 1: הגדרת כמות וזיהוי מומחים נדרשים")
             
