@@ -329,28 +329,74 @@ def color_micmac(val):
     return 'font-size: 18px;'
 
 def plot_interactive_micmac(micmac_df):
-    """יוצר גרף Plotly אינטראקטיבי ומרשים."""
+    """
+    יוצר גרף Plotly אינטראקטיבי למיפוי MICMAC. גורמים עם ערכי DP/DEP זהים
+    (שכיח בגורמים שבאותו מעגל השפעה הדדי) מוזזים מעט במעגל קטן כדי שלא
+    יתחפפו לחלוטין, ותוויות הטקסט מתחלפות במיקומן כדי לצמצם חפיפה ביניהן.
+    """
     df = micmac_df.copy()
     df['Factor'] = df.index
 
     avg_dp = df['DP'].mean()
     avg_dep = df['DEP'].mean()
 
-    fig = px.scatter(
-        df, x='DEP', y='DP',
-        text='Factor',
-        color='Classification',
-        size=[25]*len(df),
-        hover_name='Factor',
-        hover_data={'DP': True, 'DEP': True, 'Classification': True, 'Factor': False},
-        title="<b>מפת ניתוח MICMAC - מיפוי גורמים</b>",
-    )
+    # --- הפרדת גורמים עם קואורדינטות זהות ---
+    coord_groups = {}
+    for factor in df.index:
+        key = (df.loc[factor, 'DEP'], df.loc[factor, 'DP'])
+        coord_groups.setdefault(key, []).append(factor)
+
+    x_span = max(df['DEP'].max() - df['DEP'].min(), 1)
+    y_span = max(df['DP'].max() - df['DP'].min(), 1)
+    jitter_rx, jitter_ry = x_span * 0.05, y_span * 0.05
+    has_overlap = any(len(members) > 1 for members in coord_groups.values())
+
+    plot_x, plot_y = {}, {}
+    for (bx, by), members in coord_groups.items():
+        n = len(members)
+        for i, factor in enumerate(members):
+            if n == 1:
+                plot_x[factor], plot_y[factor] = bx, by
+            else:
+                angle = 2 * np.pi * i / n
+                plot_x[factor] = bx + jitter_rx * np.cos(angle)
+                plot_y[factor] = by + jitter_ry * np.sin(angle)
+
+    df['PlotX'] = df.index.map(plot_x)
+    df['PlotY'] = df.index.map(plot_y)
+
+    # מיקום תווית מתחלף לכל גורם, כדי לצמצם חפיפת טקסט בין נקודות סמוכות
+    text_positions = ['top center', 'bottom center', 'middle right', 'middle left']
+    pos_for_factor = {f: text_positions[i % len(text_positions)] for i, f in enumerate(df.index)}
+
+    palette = px.colors.qualitative.Set1
+    classes = sorted(df['Classification'].unique())
+    color_map = {cls: palette[i % len(palette)] for i, cls in enumerate(classes)}
+
+    fig = go.Figure()
+    for cls in classes:
+        sub = df[df['Classification'] == cls]
+        fig.add_trace(go.Scatter(
+            x=sub['PlotX'], y=sub['PlotY'],
+            mode='markers+text',
+            text=sub['Factor'],
+            textposition=[pos_for_factor[f] for f in sub['Factor']],
+            textfont=dict(size=13),
+            marker=dict(size=24, color=color_map[cls], line=dict(width=2, color='white')),
+            name=cls,
+            customdata=sub[['DP', 'DEP']].values,
+            hovertemplate="<b>%{text}</b><br>DP (השפעה): %{customdata[0]}<br>DEP (תלות): %{customdata[1]}<extra></extra>",
+        ))
 
     fig.add_hline(y=avg_dp, line_dash="dash", line_color="gray", annotation_text="ממוצע השפעה")
     fig.add_vline(x=avg_dep, line_dash="dash", line_color="gray", annotation_text="ממוצע תלות")
 
-    fig.update_traces(textposition='top center', textfont_size=14)
+    title = "<b>מפת ניתוח MICMAC - מיפוי גורמים</b>"
+    if has_overlap:
+        title += "<br><sup>נקודות עם ערכי DP/DEP זהים הוזזו מעט לצורך קריאות (הערכים המדויקים מוצגים ב-hover)</sup>"
+
     fig.update_layout(
+        title=title,
         xaxis_title="<b>Dependence Power (תלות)</b>",
         yaxis_title="<b>Driving Power (השפעה)</b>",
         font=dict(family="Arial", size=16),
@@ -358,17 +404,17 @@ def plot_interactive_micmac(micmac_df):
         showlegend=True,
         legend_title_text='סיווג הגורם',
         height=700,
-        margin=dict(l=40, r=40, t=60, b=40)
+        margin=dict(l=60, r=60, t=90, b=40)
     )
 
     return fig
 
-def plot_ism_hierarchy(levels, irm_df):
+def plot_ism_hierarchy(levels, irm_df, cycle_members):
     """
     מצייר את דיאגרמת המבנה ההיררכי של ISM (Level Partitioning): הרמה העליונה
     (Level I) היא הגורמים הכי תלויים (ה"תוצאות"), הרמה התחתונה היא הגורמים
-    הכי מניעים (ה"שורשים"). גורמים באותה רמה עם יותר מגורם אחד מציינים
-    מעגל השפעה הדדי (SCC) שאוחד לרמה משותפת.
+    הכי מניעים (ה"שורשים"). גורמים שבמעגל השפעה הדדי (cycle_members)
+    נצבעים בנפרד.
     """
     num_levels = len(levels)
     pos = {}
@@ -390,28 +436,38 @@ def plot_ism_hierarchy(levels, irm_df):
                 edge_x += [x0, x1, None]
                 edge_y += [y0, y1, None]
 
+    # צבעים בעלי שוני מהותי (חם מול קר) לנגישות מקסימלית - לא כחול/סגול שקשה להבדיל ביניהם
+    COLOR_CYCLE = '#EA580C'      # כתום חם - גורם שנמצא במעגל השפעה הדדי
+    COLOR_STANDALONE = '#2563EB'  # כחול קר - גורם עצמאי (לא במעגל)
+
+    is_cycle_member = {f: f in cycle_members for f in factors}
+
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=edge_x, y=edge_y, mode='lines',
         line=dict(color='#94a3b8', width=1.5),
         hoverinfo='none', showlegend=False,
     ))
-    node_x = [pos[f][0] for f in factors]
-    node_y = [pos[f][1] for f in factors]
-    node_colors = ['#7C3AED' if len(levels[num_levels - int(pos[f][1])]) > 1 else '#2563EB' for f in factors]
-    fig.add_trace(go.Scatter(
-        x=node_x, y=node_y, mode='markers+text',
-        text=factors, textposition='top center', textfont=dict(size=13),
-        marker=dict(size=28, color=node_colors, line=dict(width=2, color='white')),
-        hoverinfo='text', showlegend=False,
-    ))
+    for group_name, color, flag in [("עצמאי", COLOR_STANDALONE, False), ("מעגל השפעה הדדי", COLOR_CYCLE, True)]:
+        group_factors = [f for f in factors if is_cycle_member[f] == flag]
+        if not group_factors:
+            continue
+        fig.add_trace(go.Scatter(
+            x=[pos[f][0] for f in group_factors],
+            y=[pos[f][1] for f in group_factors],
+            mode='markers+text',
+            text=group_factors, textposition='top center', textfont=dict(size=13),
+            marker=dict(size=28, color=color, line=dict(width=2, color='white')),
+            hoverinfo='text', name=group_name, showlegend=True,
+        ))
     fig.update_layout(
-        title="<b>דיאגרמת מבנה ISM היררכית</b> (למעלה: הכי תלוי ⬆️ | למטה: הכי מניע ⬇️ | סגול = חלק ממעגל השפעה הדדי)",
+        title="<b>דיאגרמת מבנה ISM היררכית</b> (למעלה: הכי תלוי ⬆️ | למטה: הכי מניע ⬇️)",
         xaxis=dict(visible=False),
         yaxis=dict(visible=False, range=[0.3, num_levels + 0.7]),
         plot_bgcolor='#f8fafc',
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='center', x=0.5),
         height=max(400, 130 * num_levels + 120),
-        margin=dict(l=40, r=40, t=70, b=40),
+        margin=dict(l=40, r=40, t=90, b=40),
     )
     return fig
 
@@ -436,6 +492,8 @@ def init_session_state():
         st.session_state['AI_LOG'] = []
     if 'TOPIC' not in st.session_state:
         st.session_state['TOPIC'] = ""
+    if not isinstance(st.session_state.get('RESULTS', {}), dict):
+        del st.session_state['RESULTS']  # תוצאות בפורמט ישן מסשן פעיל - יחושבו מחדש
     if 'AI_USAGE' not in st.session_state:
         st.session_state['AI_USAGE'] = {'calls': 0, 'input_tokens': 0, 'output_tokens': 0, 'cost': 0.0, 'history': []}
     if 'ANTHROPIC_API_KEY' not in st.session_state:
@@ -542,6 +600,85 @@ def compute_ism_levels(frm_df):
 
     return levels
 
+def ism_cycle_members(frm_df):
+    """גורמים שנמצאים במעגל השפעה הדדי: יש גורם אחר שהם מגיעים אליו וגם הוא מגיע אליהם."""
+    m = frm_df.values.copy()
+    np.fill_diagonal(m, 0)
+    mutual = (m == 1) & (m.T == 1)
+    return {f for f, row in zip(frm_df.index, mutual) if row.any()}
+
+def classify_micmac(dp, dep):
+    """מסווג כל גורם לרביע MICMAC לפי השוואה לממוצע ההשפעה (DP) והתלות (DEP)."""
+    micmac = pd.DataFrame({'DP': dp, 'DEP': dep})
+    avg_dp, avg_dep = dp.mean(), dep.mean()
+
+    def classify(row):
+        d, p = row['DP'], row['DEP']
+        if d > avg_dp and p <= avg_dep:
+            return 'Driving (מניע) 🚀'
+        if d > avg_dp and p > avg_dep:
+            return 'Linkage (קישור) 🔗'
+        if d <= avg_dp and p > avg_dep:
+            return 'Dependent (תלוי) 🎯'
+        return 'Autonomous (אוטונומי) 🏝️'
+
+    micmac['Classification'] = micmac.apply(classify, axis=1)
+    return micmac
+
+def compute_godet_micmac(irm_df, max_power=20):
+    """
+    MICMAC עקיף לפי Godet: מעלים את מטריצת ההשפעה הישירה (ללא אלכסון) בחזקות עד
+    שדירוג ההשפעה והתלות מתייצב. סגירה טרנזיטיבית בוליאנית (FRM) הופכת לכולה 1
+    ברגע שמעגל השפעה אחד עובר דרך רוב הגורמים, ואז DP/DEP זהים לכולם; ספירת
+    מסלולים ממשיכה להבחין בין הגורמים גם במצב כזה.
+    בגרף ללא מעגלים החזקות מתאפסות, ולכן נספרים כל המסלולים הישירים והעקיפים.
+    מחזיר (dp, dep, power) כאחוזים מסך ההשפעה.
+    """
+    M = irm_df.values.astype(float).copy()
+    np.fill_diagonal(M, 0)
+    power_k = M.copy()
+    cumulative = M.copy()
+    prev_rank, power, cyclic = None, 1, True
+    for k in range(2, max_power + 1):
+        power_k = power_k @ M
+        if not power_k.any():
+            cyclic = False
+            break
+        cumulative += power_k
+        power = k
+        rank = (tuple(np.argsort(-power_k.sum(axis=1), kind='stable')),
+                tuple(np.argsort(-power_k.sum(axis=0), kind='stable')))
+        if rank == prev_rank:
+            break
+        prev_rank = rank
+
+    basis = power_k if cyclic else cumulative
+    total = basis.sum()
+    if total == 0:
+        zeros = pd.Series(0.0, index=irm_df.index)
+        return zeros, zeros, power
+    dp = pd.Series(basis.sum(axis=1) / total * 100, index=irm_df.index)
+    dep = pd.Series(basis.sum(axis=0) / total * 100, index=irm_df.index)
+    return dp, dep, power
+
+def build_analysis_results(irm, frm_df, micmac):
+    """מרכז את כל תוצרי הניתוח, כולל מדד רוויה של ה-FRM וסיווג MICMAC עקיף (Godet)."""
+    n = len(frm_df)
+    off_diag = frm_df.values.copy()
+    np.fill_diagonal(off_diag, 0)
+    saturation = off_diag.sum() / (n * (n - 1)) if n > 1 else 0.0
+    dp_g, dep_g, power = compute_godet_micmac(irm)
+    classic_degenerate = saturation >= 0.8 or (micmac['DP'].nunique() == 1 and micmac['DEP'].nunique() == 1)
+    return {
+        'irm': irm,
+        'frm': frm_df,
+        'micmac': micmac,
+        'micmac_godet': classify_micmac(dp_g.round(1), dep_g.round(1)),
+        'godet_power': power,
+        'saturation': saturation,
+        'classic_degenerate': classic_degenerate,
+    }
+
 def calculate_ism_matrices():
     """מבצע את כל חישובי הליבה: אגרגציה וזיהוי קונפליקטים."""
     factors = st.session_state['FACTORS']
@@ -602,19 +739,16 @@ def solve_conflicts_and_finalize(ssim, conflicts):
         time.sleep(0.1)
         ai_res = call_ai_analysis(conf, justs, fi, fj)
         
-        rec = 'O'
+        rec = None
         explanation = "לא זוהה הסבר"
-        
-        if "RECOMMENDATION:" in ai_res:
-            try:
-                parts = ai_res.split("RATIONALE:")
-                rec_part = parts[0].split("RECOMMENDATION:")[1].strip()
-                rec = rec_part.replace(',', '').replace('.', '').strip()
-                if len(parts) > 1:
-                    explanation = parts[1].strip()
-            except:
-                pass
-        
+
+        rec_match = re.search(r'RECOMMENDATION:\s*[\*\[\("\']*\s*([VAXO])\b', ai_res, re.IGNORECASE)
+        if rec_match:
+            rec = rec_match.group(1).upper()
+        rat_match = re.search(r'RATIONALE:\s*(.*)', ai_res, re.DOTALL)
+        if rat_match:
+            explanation = rat_match.group(1).strip()
+
         if rec not in SYMBOLS:
             rec = conf['counts'].most_common(1)[0][0]
         
@@ -667,24 +801,7 @@ def solve_conflicts_and_finalize(ssim, conflicts):
 
     frm_df = pd.DataFrame(frm, index=factors, columns=factors)
 
-    dp = frm_df.sum(axis=1)
-    dep = frm_df.sum(axis=0)
-    micmac = pd.DataFrame({'DP': dp, 'DEP': dep})
-
-    avg_dp = dp.mean()
-    avg_dep = dep.mean()
-
-    def classify(row):
-        d, p = row['DP'], row['DEP']
-        if d > avg_dp and p <= avg_dep:
-            return 'Driving (מניע) 🚀'
-        if d > avg_dp and p > avg_dep:
-            return 'Linkage (קישור) 🔗'
-        if d <= avg_dp and p > avg_dep:
-            return 'Dependent (תלוי) 🎯'
-        return 'Autonomous (אוטונומי) 🏝️'
-        
-    micmac['Classification'] = micmac.apply(classify, axis=1)
+    micmac = classify_micmac(frm_df.sum(axis=1), frm_df.sum(axis=0))
     st.session_state['SSIM_INIT'] = ssim.copy()  # מטריצה ראשונית עם קונפליקטים (C)
     st.session_state['FINAL_SSIM'] = final_ssim.copy()  # מטריצה אחרי פתרון קונפליקטים
     
@@ -759,7 +876,7 @@ def _call_anthropic(full_prompt, system_context):
                 raise
             time.sleep(2)
 
-def call_ai_unified(prompt, system_context="", use_search=False):
+def call_ai_unified(prompt, system_context="", use_search=False, search_query=None):
     """
     פונקציית-העל היחידה לכל קריאות ה-AI באפליקציה.
     מנתבת לספק שנבחר (OpenRouter החינמי או Claude Sonnet 5 של Anthropic).
@@ -771,7 +888,7 @@ def call_ai_unified(prompt, system_context="", use_search=False):
     citations = []
 
     if use_search:
-        results = _ddg_search(f"{system_context} {prompt[:150]}", max_results=4)
+        results = _ddg_search(search_query or f"{system_context} {prompt[:150]}", max_results=4)
         search_ctx = "\n\nמקורות מהאינטרנט:\n"
         for r in results:
             search_ctx += f"- {r.get('title', '')}: {r.get('body', '')} ({r.get('href', '')})\n"
@@ -826,7 +943,7 @@ def _try_parse_json(raw_text, open_char='{', close_char='}'):
     except json.JSONDecodeError as e:
         return None, f"{e} (בבלוק שחולץ: ...{cleaned[max(0, e.pos-40):e.pos+40]}...)"
 
-def call_ai_json(prompt, system_context, open_char='{', close_char='}', max_retries=2, use_search=False):
+def call_ai_json(prompt, system_context, open_char='{', close_char='}', max_retries=2, use_search=False, search_query=None):
     """
     קורא ל-AI ומצפה לתשובת JSON. אם הפרסור נכשל (שגיאת פורמט נפוצה אצל מודלי שפה),
     מנסה שוב עד max_retries פעמים תוך שליחת שגיאת הפרסור בחזרה למודל לתיקון עצמי.
@@ -834,7 +951,7 @@ def call_ai_json(prompt, system_context, open_char='{', close_char='}', max_retr
     current_prompt = prompt
     last_error = None
     for attempt in range(max_retries + 1):
-        text, citations = call_ai_unified(current_prompt, system_context, use_search=(use_search and attempt == 0))
+        text, citations = call_ai_unified(current_prompt, system_context, use_search=(use_search and attempt == 0), search_query=search_query)
         data, err = _try_parse_json(text, open_char, close_char)
         if err is None:
             return data, citations
@@ -849,24 +966,62 @@ def call_ai_json(prompt, system_context, open_char='{', close_char='}', max_retr
 def call_ai_analysis(conflict_data, justifications, f_i, f_j):
     """פונה ל-OpenRouter להכרעה בקונפליקטים בטאב 2."""
     try:
-        counts_str = ", ".join([f"{k}: {v}" for k, v in conflict_data['counts'].items()])
-        justs_text = "\n".join([f"- {j['expert']} ({j['symbol']}): {j['text']}" for j in justifications])
-        
-        prompt = f"""הוכרע בין מומחים לגבי הקשר בין {f_i} ל-{f_j}.
-הצבעות: {counts_str}
-נימוקים:
+        counts = conflict_data['counts']
+        total = sum(counts.values())
+        counts_str = ", ".join(f"{k}: {v} ({v / total:.0%})" for k, v in counts.most_common())
+        justs_text = "\n".join([f"- {j['expert']} ({j['symbol']}): {j['text']}" for j in justifications]) or "(לא נמסרו נימוקים)"
+
+        prompt = f"""מומחים חלוקים לגבי הקשר הישיר בין "{f_i}" (הגורם הראשון) לבין "{f_j}" (הגורם השני).
+משמעות הסימנים: V = הראשון משפיע ישירות על השני; A = השני משפיע ישירות על הראשון;
+X = השפעה הדדית ישירה; O = אין השפעה ישירה ביניהם.
+התפלגות ההצבעות: {counts_str}
+נימוקי המומחים (ייתכן שחלק מהמצביעים לא נימקו):
 {justs_text}
 
-קבע את ההכרעה הסופית (V, A, X, או O) ונמק.
-החזר בפורמט:
-RECOMMENDATION: [הסימבול]
-RATIONALE: [הנימוק]"""
-        
-        text, _ = call_ai_unified(prompt, "אתה שופט אקדמי אובייקטיבי ל-ISM.", use_search=False)
+קבע את ההכרעה הסופית לפי עוצמת הטיעונים ולא לפי מספרם בלבד.
+הערה: רק השפעה *ישירה* נחשבת - קשר עקיף דרך גורם שלישי, או מתאם כללי, מצדיקים O.
+אם הטיעונים לקשר ישיר אינם משכנעים, בחר O. X רק כאשר יש טיעון משכנע לשני הכיוונים.
+החזר בדיוק בפורמט:
+RECOMMENDATION: <אחת מהאותיות V, A, X, O>
+RATIONALE: <נימוק קצר>"""
+
+        text, _ = call_ai_unified(prompt, "אתה שופט אקדמי אובייקטיבי בניתוח ISM.", use_search=False)
         return text
     except Exception as e:
         vote = conflict_data['counts'].most_common(1)[0][0]
         return f"RECOMMENDATION: {vote}\nRATIONALE: שגיאת AI ({str(e)})."
+
+def _research_factors(topic, num_factors):
+    """חוקר את נושא הבעיה (כולל חיפוש באינטרנט) וממליץ על גורמים לניתוח ISM-MICMAC."""
+    prompt = f"""נושא הבעיה לניתוח: "{topic}".
+חקור את הנושא והמלץ על {num_factors} גורמים מרכזיים לניתוח ISM-MICMAC של הבעיה.
+
+דרישות:
+- כל גורם הוא מושג אחד ברור, ברמת הפשטה דומה לשאר הגורמים, ללא חפיפה ביניהם.
+- שם הגורם קצר (2-5 מילים) וללא פסיקים.
+- כלול גם גורמי שורש (שמניעים אחרים) וגם גורמי תוצאה (שמושפעים מאחרים), כדי שלמבנה ההיררכי תהיה משמעות.
+- העדף גורמים שמופיעים בספרות המקצועית או במקורות שנמצאו בחיפוש.
+
+החזר אך ורק JSON (רשימה, ללא טקסט נוסף לפני/אחרי, ללא ```), עם {num_factors} רשומות בדיוק:
+[{{"name": "שם הגורם", "description": "הסבר קצר מה הגורם כולל", "rationale": "למה הוא רלוונטי לבעיה"}}]"""
+
+    data, citations = call_ai_json(
+        prompt,
+        "אתה חוקר מערכות מומחה בזיהוי גורמים לניתוח ISM-MICMAC.",
+        open_char='[', close_char=']',
+        use_search=True,
+        search_query=f"{topic} גורמים משפיעים",
+    )
+    factors = []
+    for item in (data if isinstance(data, list) else []):
+        name = str(item.get("name", "")).replace(",", " -").strip()
+        if name:
+            factors.append({
+                "name": name,
+                "description": str(item.get("description", "")).strip(),
+                "rationale": str(item.get("rationale", "")).strip(),
+            })
+    return factors, citations
 
 def _get_ai_expert_recommendations(topic, factors, num_experts=3):
     """ייעוץ AI לבחירת מומחים."""
@@ -924,7 +1079,7 @@ def _simulate_synthetic_expert(role_info, factors):
         }
     return matrix, citations
 
-def _inject_synthetic_data_or(role_info, matrix_data, factors, citations=[]):
+def _inject_synthetic_data_or(role_info, matrix_data, factors, citations=[], instance_label=None):
     """הזנת נתונים סינתטיים עם מקורות מהאינטרנט."""
     synth_id = f"Synth_{len([k for k in st.session_state['EXPERT_DATA'] if k.startswith('Synth_')]) + 1}"
     
@@ -942,16 +1097,19 @@ def _inject_synthetic_data_or(role_info, matrix_data, factors, citations=[]):
             if sym not in ['V','A','X','O']:
                 sym = 'O'
             responses[f_i][f_j] = sym
-            if sym != 'O':
-                pair = (f_i, f_j)
-                justs.setdefault(pair, []).append({
-                    "expert": role_info['role'],
+            # גם נימוקי O נשמרים, כדי ששופט הקונפליקטים ישמע את שני הצדדים
+            if reason:
+                justs.setdefault((f_i, f_j), []).append({
+                    "expert": role_info['role'] + (f" {instance_label}" if instance_label else ""),
                     "symbol": sym,
-                    "text": f"🌐 OpenRouter: {reason}"
+                    "text": f"🤖 {reason}"
                 })
     
+    display_name = f"סוכן AI - {role_info['role']}"
+    if instance_label:
+        display_name += f" {instance_label}"
     st.session_state['EXPERT_DATA'][synth_id] = {
-        'name': f"סוכן AI - {role_info['role']}",
+        'name': display_name,
         'role': role_info.get('expertise',''),
         'responses': responses
     }
@@ -1044,6 +1202,82 @@ def color_ssim_conflicts(val):
         return 'background-color: #fef9c3; color: #713f12;'
     return ''
     
+def _render_factor_research():
+    """חקר נושא הבעיה והמלצה על גורמים, עם אפשרות להזין אותם לדף הגדרות השאלון."""
+    st.subheader("🔬 חקר הנושא והמלצה על גורמים")
+    topic = (st.session_state.get('TOPIC') or st.session_state.get('txt_topic_tab1') or '').strip()
+    if not topic:
+        st.warning("⚠️ לא הוגדר נושא בעיה. הגדר אותו בטאב 'הגדרות שאלון' (שדה 'נושא הבעיה') כדי שה-AI יוכל לחקור אותו.")
+        return
+    st.write(f"📌 **נושא:** {topic}")
+
+    num_factors = int(st.number_input("כמות גורמים מבוקשת", min_value=3, max_value=25, value=8, step=1, key="num_research_factors"))
+    pairs = num_factors * (num_factors - 1) // 2
+    st.caption(f"{num_factors} גורמים = {pairs} זוגות שכל מומחה או סוכן יעריך.")
+    if num_factors > 15:
+        st.warning(f"⚠️ {pairs} זוגות לכל משיב: הסימולציה תהיה ארוכה ויקרה יותר, ושאלון כזה קשה למילוי ע\"י מומחים אנושיים.")
+
+    if st.button("🔬 חקור את הנושא והמלץ על גורמים", key="btn_research_factors"):
+        with st.spinner("🤖 חוקר את הנושא ומחפש מקורות..."):
+            try:
+                recs, citations = _research_factors(topic, num_factors)
+                st.session_state['AI_RECOMMENDED_FACTORS'] = recs
+                st.session_state['AI_FACTOR_CITATIONS'] = citations
+                st.session_state['AI_FACTOR_RECS_VERSION'] = st.session_state.get('AI_FACTOR_RECS_VERSION', 0) + 1
+            except Exception as e:
+                st.error(f"❌ {e}")
+
+    recs = st.session_state.get('AI_RECOMMENDED_FACTORS')
+    if not recs:
+        return
+
+    st.markdown(f"**{len(recs)} גורמים מומלצים.** סמן אילו לכלול; אפשר לערוך את שמות הגורמים ישירות בטבלה.")
+    editor_df = pd.DataFrame([
+        {"לכלול": True, "גורם": r["name"], "תיאור": r["description"], "נימוק": r["rationale"]} for r in recs
+    ])
+    edited = st.data_editor(
+        editor_df,
+        key=f"factor_recs_editor_{st.session_state.get('AI_FACTOR_RECS_VERSION', 0)}",
+        hide_index=True,
+        use_container_width=True,
+        disabled=["תיאור", "נימוק"],
+        column_config={"לכלול": st.column_config.CheckboxColumn("לכלול", width="small")},
+    )
+
+    citations = st.session_state.get('AI_FACTOR_CITATIONS') or []
+    if citations:
+        with st.expander("🌐 מקורות שנמצאו בחיפוש"):
+            for url in citations:
+                st.markdown(f"- {url}")
+
+    mode = st.radio(
+        "אופן ההזנה לדף הגדרות השאלון",
+        ["החלף את רשימת הגורמים הקיימת", "הוסף לרשימת הגורמים הקיימת"],
+        horizontal=True,
+        key="factor_insert_mode",
+    )
+    if st.button("📥 הזן לדף הגדרות השאלון", key="btn_insert_factors"):
+        chosen = [str(name).replace(",", " -").strip() for name, include in zip(edited["גורם"], edited["לכלול"]) if include]
+        chosen = [c for c in chosen if c]
+        if not chosen:
+            st.error("לא נבחר אף גורם.")
+            return
+        merged = []
+        if mode.startswith("הוסף"):
+            merged = [x.strip() for x in st.session_state.get('txt_factors_tab1', '').split(',') if x.strip()]
+        seen = {m.casefold() for m in merged}
+        for c in chosen:
+            if c.casefold() not in seen:
+                merged.append(c)
+                seen.add(c.casefold())
+        st.session_state['PENDING_FACTORS_TEXT'] = ",\n".join(merged)
+        st.session_state['FACTORS_INSERTED_NOTICE'] = len(merged)
+        st.rerun()
+
+    inserted = st.session_state.pop('FACTORS_INSERTED_NOTICE', None)
+    if inserted:
+        st.success(f"✅ רשימה של {inserted} גורמים הוזנה לטאב 'הגדרות שאלון'. עבור לשם, בדוק אותה ולחץ 'שמור ועדכן הכל' כדי להחיל.")
+
 @st.fragment(run_every=2)
 def _render_ai_usage_live():
     """לוח צריכת טוקנים ועלות - מתרענן אוטומטית כל 2 שניות."""
@@ -1291,8 +1525,14 @@ def screen_admin_dashboard():
         st.markdown("---")
         
         st.subheader("עריכת גורמי המערכת")
-        curr = ",\n".join(st.session_state['FACTORS'])
-        new_f = st.text_area("רשימת הגורמים (כל גורם מופרד בפסיק)", value=curr, height=300, key="txt_factors_tab1")
+        # מצב תיבת הטקסט נשמר במפתח שלה; גורמים שהומלצו במרכז ה-AI ממתינים כאן ומוזנים לפני ציור התיבה
+        pending = st.session_state.pop('PENDING_FACTORS_TEXT', None)
+        if pending is not None:
+            st.session_state['txt_factors_tab1'] = pending
+            st.info("📥 הגורמים שהומלצו ע\"י מרכז ה-AI הוזנו לרשימה למטה. עבור עליהם, ערוך במידת הצורך ולחץ **שמור ועדכן הכל** כדי להחיל אותם (השמירה מאפסת את תשובות המומחים שנאספו).")
+        elif 'txt_factors_tab1' not in st.session_state:
+            st.session_state['txt_factors_tab1'] = ",\n".join(st.session_state['FACTORS'])
+        new_f = st.text_area("רשימת הגורמים (כל גורם מופרד בפסיק)", height=300, key="txt_factors_tab1")
         
         curr_q = st.session_state.get('GENERIC_QUESTION', DEFAULT_GENERIC_QUESTION)
         new_q = st.text_input("נוסח השאלה (השתמש ב-{i} ו-{j} כמשתנים)", value=curr_q, key="txt_question_tab1")
@@ -1418,16 +1658,17 @@ def screen_admin_dashboard():
                 if st.button(f"🤖 הפעל AI לפתרון {len(conflicts)} קונפליקטים", key="btn_solve_conflicts"):
                     with st.spinner("ה-AI מנתח נימוקים ומבצע חישובים..."):
                         final_ssim, irm, frm, micmac = solve_conflicts_and_finalize(ssim_init, conflicts)
-                        st.session_state['RESULTS'] = (irm, frm, micmac)
+                        st.session_state['RESULTS'] = build_analysis_results(irm, frm, micmac)
                         st.rerun()
 
             elif not conflicts and 'RESULTS' not in st.session_state:
                 final_ssim, irm, frm, micmac = solve_conflicts_and_finalize(ssim_init, [])
-                st.session_state['RESULTS'] = (irm, frm, micmac)
+                st.session_state['RESULTS'] = build_analysis_results(irm, frm, micmac)
                 st.rerun()
 
             if 'RESULTS' in st.session_state:
-                irm, frm, micmac = st.session_state['RESULTS']
+                results = st.session_state['RESULTS']
+                irm, frm = results['irm'], results['frm']
                 st.success("✅ הניתוח הושלם.")
                 
                 # === הצגת מטריצות הקשרים ===
@@ -1451,10 +1692,20 @@ def screen_admin_dashboard():
                         st.info("💡 **מקרא:** V=משפיע על, A=מושפע מ, X=הדדי, O=אין קשר")
                         st.dataframe(st.session_state['FINAL_SSIM'], use_container_width=True)
                 
-                # מטריצת נגישות סופית (FRM)
+                with st.expander("➡️ מטריצת נגישות ראשונית (IRM) - השפעות ישירות בלבד", expanded=False):
+                    st.dataframe(irm, use_container_width=True)
+
                 with st.expander("🎯 מטריצת נגישות סופית (FRM) - עם טרנזיטיביות", expanded=False):
                     st.info("💡 מציגה השפעות ישירות **ועקיפות** בין גורמים")
                     st.dataframe(frm, use_container_width=True)
+
+                if results['classic_degenerate']:
+                    st.warning(
+                        f"⚠️ מטריצת הנגישות רוויה: {results['saturation']:.0%} מהתאים מחוץ לאלכסון הם 1. "
+                        "זו תוצאה נכונה מתמטית כשקיים מעגל השפעה שעובר דרך רוב הגורמים, אבל הסיווג הקלאסי "
+                        "לפי סכומי ה-FRM לא יכול להבחין בין גורמים במצב כזה. בטאב 'תוצאות סופיות' הסיווג "
+                        "יוצג לפי MICMAC עקיף (Godet), שמבחין בין הגורמים גם כאן."
+                    )
                 
                 # הצגת לוג ה-AI
                 if st.session_state['AI_LOG']:
@@ -1465,22 +1716,44 @@ def screen_admin_dashboard():
     # --- טאב 3: תוצאות ---
     with tab3:
         if 'RESULTS' in st.session_state:
-            irm, frm, micmac = st.session_state['RESULTS']
+            results = st.session_state['RESULTS']
+            irm, frm = results['irm'], results['frm']
 
             st.markdown("### 🏛️ מבנה היררכי (ISM Level Partitioning)")
-            st.caption("זהו הפלט המרכזי של ניתוח ה-ISM עצמו (בנפרד מ-MICMAC): חלוקה היררכית של הגורמים לרמות, מהתלוי ביותר (למעלה) למניע ביותר (למטה). גורמים שנמצאים במעגל השפעה הדדי מאוחדים לאותה רמה (מסומנים בסגול).")
+            st.caption("זהו הפלט המרכזי של ניתוח ה-ISM עצמו (בנפרד מ-MICMAC): חלוקה היררכית של הגורמים לרמות, מהתלוי ביותר (למעלה) למניע ביותר (למטה). גורמים שמגיעים זה לזה (מעגל השפעה הדדי) נמצאים תמיד באותה רמה ומסומנים בכתום.")
             levels = compute_ism_levels(frm)
-            fig_h = plot_ism_hierarchy(levels, irm)
+            cycles = ism_cycle_members(frm)
+            if len(levels) == 1 and len(frm) > 1:
+                st.warning("⚠️ כל הגורמים נמצאים ברמה אחת: כולם מגיעים זה לזה דרך מעגלי השפעה, ולכן אין היררכיה. זה משקף צפיפות קשרים גבוהה בתשובות - ראה 'בדיקת צפיפות ואבחון תשובות' בטאב 'מעקב וניתוח'.")
+            fig_h = plot_ism_hierarchy(levels, irm, cycles)
             st.plotly_chart(fig_h, use_container_width=True)
             with st.expander("📋 טבלת רמות"):
                 level_rows = []
                 for idx, lvl in enumerate(levels):
-                    tag = " (מעגל השפעה הדדי)" if len(lvl) > 1 else ""
-                    level_rows.append({"רמה": f"Level {idx + 1}{tag}", "גורמים": ", ".join(lvl)})
+                    in_cycle = [f for f in lvl if f in cycles]
+                    tag = f" (מעגל השפעה הדדי: {', '.join(in_cycle)})" if in_cycle else ""
+                    level_rows.append({"רמה": f"Level {idx + 1}", "גורמים": ", ".join(lvl) + tag})
                 st.dataframe(pd.DataFrame(level_rows), use_container_width=True, hide_index=True)
 
             st.markdown("---")
             st.markdown("### 📊 מפת MICMAC ויזואלית")
+            method_labels = {
+                'classic': "ISM-MICMAC קלאסי (סכומי FRM)",
+                'godet': f"MICMAC עקיף - Godet (חזקת מטריצה {results['godet_power']})",
+            }
+            method = st.radio(
+                "שיטת חישוב ההשפעה והתלות",
+                options=list(method_labels.keys()),
+                format_func=method_labels.get,
+                index=1 if results['classic_degenerate'] else 0,
+                horizontal=True,
+                key="micmac_method",
+            )
+            if results['classic_degenerate']:
+                st.info(f"ℹ️ ה-FRM רווי ({results['saturation']:.0%} מהתאים הם 1), ולכן בשיטה הקלאסית כמעט לכל הגורמים יש אותם DP ו-DEP. ברירת המחדל כאן היא MICMAC עקיף לפי Godet, שסופר מסלולי השפעה ישירים ועקיפים ומבחין בין הגורמים גם במצב כזה.")
+            if method == 'godet':
+                st.caption("ערכי DP/DEP בשיטה זו הם אחוז מסך ההשפעה במערכת (מחושב מחזקות מטריצת ההשפעה הישירה עד להתייצבות הדירוג).")
+            micmac = results['micmac_godet'] if method == 'godet' else results['micmac']
             fig = plot_interactive_micmac(micmac)
             st.plotly_chart(fig, use_container_width=True)
 
@@ -1500,79 +1773,109 @@ def screen_admin_dashboard():
     # --- טאב 4: מרכז AI מתקדם ---
     with tab4:
         st.header("🧠 מרכז ייעוץ וסימולציה מערכתית")
-        st.info("זרימת עבודה: 1️⃣ ה-AI מנתח את הגורמים וממליץ על מומחים נדרשים → 2️⃣ הפעלת סוכני AI שימלאו את השאלון במקומם, עם נימוקים מבוססי גלישה באינטרנט.")
-        
+        st.info("זרימת עבודה: 🔬 חקר הנושא והמלצה על גורמים → 1️⃣ זיהוי סוגי המומחים הנדרשים → 2️⃣ כמות מומחים מכל סוג → 3️⃣ הפעלת סוכני AI שימלאו את השאלון, עם נימוקים מבוססי גלישה באינטרנט.")
+
         if not is_ai_ready():
             st.error(f"⚠️ ספק ה-AI הנוכחי ({ai_provider_label()}) אינו מוגדר או שחסר מפתח API. עבור לטאב 'מנוע AI' כדי להגדיר.")
         else:
-            st.subheader("שלב 1: הגדרת כמות וזיהוי מומחים נדרשים")
-            
+            _render_factor_research()
+            st.markdown("---")
+            st.subheader("שלב 1: הגדרת כמות וזיהוי סוגי מומחים נדרשים")
+            st.caption("המספר כאן הוא כמות **סוגי המומחים** (תפקידים שונים, למשל: אנליסט, עורך דין, שוטר, פסיכולוג). לכמות המומחים מכל סוג יש בקרה נפרדת בשלב הבא.")
+
             col1, col2 = st.columns([1, 3])
             with col1:
-                num_experts = st.number_input(
-                    "מספר מומחים רצוי:",
+                num_expert_types = st.number_input(
+                    "כמות סוגי מומחים:",
                     min_value=1,
-                    max_value=10,
+                    max_value=30,
                     value=3,
                     step=1,
-                    help="כמה סוכני AI תרצה שייצרו וימלאו את השאלון?",
-                    key="num_experts_tab4"
+                    help="כמה תפקידי מומחה שונים ה-AI יזהה וימליץ?",
+                    key="num_expert_types_tab4"
                 )
-            
+
             topic_ctx = st.session_state.get('TOPIC', 'לא הוגדר')
             factors_ctx = st.session_state['FACTORS']
             with col2:
                 st.write(f"📌 **נושא:** `{topic_ctx}` | **גורמים:** {len(factors_ctx)}")
-            
-            if st.button(" הפק המלצות למומחים", key="btn_advisor_synth_v3"):
-                with st.spinner(f"🤖 מנתח ומחפש {num_experts} תפקידים מתאימים..."):
+
+            if st.button(" הפק המלצות לסוגי מומחים", key="btn_advisor_synth_v3"):
+                with st.spinner(f"🤖 מנתח ומחפש {num_expert_types} תפקידים מתאימים..."):
                     try:
-                        recs = _get_ai_expert_recommendations(topic_ctx, factors_ctx, num_experts)
+                        recs = _get_ai_expert_recommendations(topic_ctx, factors_ctx, num_expert_types)
                         st.session_state['AI_RECOMMENDED_EXPERTS'] = recs
-                        st.success(f"✅ זוהו {len(recs)} תפקידי מומחים רלוונטיים.")
+                        st.session_state.pop('EXPERT_TYPE_QUANTITIES', None)
+                        st.success(f"✅ זוהו {len(recs)} סוגי מומחים רלוונטיים.")
                     except Exception as e:
                         st.error(f"❌ {e}")
 
             if 'AI_RECOMMENDED_EXPERTS' in st.session_state:
-                st.markdown("###  המומחים המומלצים:")
-                for idx, exp in enumerate(st.session_state['AI_RECOMMENDED_EXPERTS']):
-                    st.info(f"**{idx+1}. {exp['role']}** ({exp.get('expertise','')})\n💡 {exp.get('rationale','')}")
-                
+                experts_list = st.session_state['AI_RECOMMENDED_EXPERTS']
+
                 st.markdown("---")
-                st.subheader("שלב 2: הפעלת סוכני AI סינתטיים")
+                st.subheader("שלב 2: כמות מומחים מכל סוג")
+                st.caption("לכל סוג מומחה שזוהה, קבע כמה סוכני AI עצמאיים (עם שיפוט משלהם) ירוצו מאותו סוג - זה מדמה כמה מומחים אמיתיים מאותו תחום שעשויים לחלוק דעות שונות.")
+
+                quantities = st.session_state.setdefault('EXPERT_TYPE_QUANTITIES', {})
+                for idx, exp in enumerate(experts_list):
+                    qc1, qc2 = st.columns([4, 1])
+                    with qc1:
+                        st.info(f"**{idx+1}. {exp['role']}** ({exp.get('expertise','')})\n💡 {exp.get('rationale','')}")
+                    with qc2:
+                        quantities[idx] = st.number_input(
+                            "כמות",
+                            min_value=0,
+                            max_value=30,
+                            value=quantities.get(idx, 1),
+                            step=1,
+                            key=f"qty_expert_type_{idx}",
+                            label_visibility="visible",
+                        )
+
+                total_agents = sum(quantities.values())
+                st.metric("סה\"כ סוכני AI שיופעלו", total_agents)
+                if total_agents > 15:
+                    est_minutes = round(total_agents * 5 / 60, 1)
+                    st.warning(f"⚠️ {total_agents} סוכנים עם השהיה של 5 שניות ביניהם ייקחו כ-{est_minutes} דקות לפחות, ובהתאם לספק AI בתשלום עלולים לעלות משמעותית יותר. אפשר לעקוב אחרי העלות בזמן אמת בטאב 'מנוע AI'.")
+
+                st.markdown("---")
+                st.subheader("שלב 3: הפעלת סוכני AI סינתטיים")
                 st.warning("⚠️ הסוכנים ימלאו את השאלון במקום המומחים וינמקו בעזרת מקורות מהאינטרנט. התהליך עשוי לקחת מספר דקות.")
-                
-                if st.button("🚀 הפעל סימולציה והזן למערכת", key="btn_sim_synth_v3"):
+
+                if st.button("🚀 הפעל סימולציה והזן למערכת", key="btn_sim_synth_v3", disabled=(total_agents == 0)):
                     progress = st.progress(0)
                     status_text = st.empty()
-                    experts_list = st.session_state['AI_RECOMMENDED_EXPERTS']
+                    run_queue = []
+                    for idx, exp in enumerate(experts_list):
+                        qty = quantities.get(idx, 0)
+                        for inst in range(1, qty + 1):
+                            run_queue.append((exp, inst if qty > 1 else None))
+
                     success_count = 0
-                    
-                    for i, exp_role in enumerate(experts_list):
-                        status_text.text(f"🔄 מעבד סוכן {i+1}/{len(experts_list)}: {exp_role['role']}...")
-                        
+                    for i, (exp_role, instance_num) in enumerate(run_queue):
+                        label = f"{exp_role['role']}" + (f" #{instance_num}" if instance_num else "")
+                        status_text.text(f"🔄 מעבד סוכן {i+1}/{len(run_queue)}: {label}...")
+
                         try:
                             matrix, citations = _simulate_synthetic_expert(exp_role, factors_ctx)
-                            _inject_synthetic_data_or(exp_role, matrix, factors_ctx, citations)
+                            instance_label = f"#{instance_num}" if instance_num else None
+                            _inject_synthetic_data_or(exp_role, matrix, factors_ctx, citations, instance_label=instance_label)
                             success_count += 1
-                            
-                            if i < len(experts_list) - 1:
-                                st.info(f"⏳ המתנה של 5 שניות לפני הסוכן הבא...")
+
+                            if i < len(run_queue) - 1:
                                 time.sleep(5)
-                                
+
                         except Exception as e:
-                            st.error(f"❌ **שגיאה בסוכן {exp_role['role']}:** {e}")
-                            if st.button("⏹️ עצור סימולציה", key=f"btn_stop_{i}"):
-                                st.warning("הסימולציה הופסקה על ידי המשתמש")
-                                break
-                        
-                        progress.progress((i + 1) / len(experts_list))
-                    
+                            st.error(f"❌ **שגיאה בסוכן {label}:** {e}")
+
+                        progress.progress((i + 1) / len(run_queue))
+
                     progress.empty()
                     status_text.empty()
-                    
+
                     if success_count > 0:
-                        st.success(f"✅ סימולציה הושלמה! {success_count}/{len(experts_list)} סוכנים הוזנו בהצלחה למערכת.")
+                        st.success(f"✅ סימולציה הושלמה! {success_count}/{len(run_queue)} סוכנים הוזנו בהצלחה למערכת.")
                         st.info("עבור לטאב 'מעקב וניתוח' כדי לראות את המומחים החדשים ולהריץ את חישובי ה-ISM.")
                         st.rerun()
                     else:
