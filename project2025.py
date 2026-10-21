@@ -10,6 +10,15 @@ import datetime
 import json
 import re
 import io
+import os
+import hmac
+import uuid
+
+import storage
+from ism_core import (
+    transitive_closure, compute_ism_levels, ism_cycle_members,
+    classify_micmac, build_analysis_results,
+)
 
 # ==============================================================================
 # 0. הגדרות מערכת, ספריות ו-API (OpenRouter + DuckDuckGo - חינם!)
@@ -21,10 +30,14 @@ except ImportError:
     OPENAI_AVAILABLE = False
 
 try:
-    from duckduckgo_search import DDGS
+    from ddgs import DDGS  # השם החדש של duckduckgo_search
     DDGS_AVAILABLE = True
 except ImportError:
-    DDGS_AVAILABLE = False
+    try:
+        from duckduckgo_search import DDGS
+        DDGS_AVAILABLE = True
+    except ImportError:
+        DDGS_AVAILABLE = False
 
 try:
     import anthropic
@@ -34,16 +47,32 @@ except ImportError:
 
 API_AVAILABLE = OPENAI_AVAILABLE and DDGS_AVAILABLE
 
-# --- קונפיגורציה ---
-ADMIN_USERNAME = "admin_ism"
-ADMIN_PASSWORD = "123"
-
 def _get_secret(key, default=""):
-    """קורא מפתח מ-st.secrets בבטחה, גם כשלא קיים קובץ secrets.toml כלל."""
+    """קורא מפתח מ-st.secrets בבטחה, גם כשלא קיים קובץ secrets.toml כלל. אחרת - ממשתנה סביבה."""
     try:
-        return st.secrets.get(key, default)
+        value = st.secrets.get(key)
+        if value:
+            return value
     except Exception:
-        return default
+        pass
+    return os.environ.get(key, default)
+
+# --- קונפיגורציה ---
+# פרטי המנהל נקראים מ-secrets.toml או ממשתני סביבה, ולא כתובים בקוד.
+# אם לא הוגדרה סיסמה, כניסת המנהל חסומה.
+ADMIN_USERNAME = _get_secret("ADMIN_USERNAME", "admin_ism")
+ADMIN_PASSWORD = _get_secret("ADMIN_PASSWORD", "")
+
+# מסד הנתונים המשותף לכל הסשנים (מומחים מכמה מכשירים + המנהל)
+DB_PATH = _get_secret("ISM_DB_PATH", storage.DEFAULT_DB_PATH)
+storage.init_db(DB_PATH)
+
+def check_admin_credentials(username, password):
+    """השוואה בזמן קבוע, כדי לא לחשוף מידע דרך זמני תגובה."""
+    if not ADMIN_PASSWORD:
+        return False
+    return (hmac.compare_digest(username.encode(), ADMIN_USERNAME.encode())
+            and hmac.compare_digest(password.encode(), ADMIN_PASSWORD.encode()))
 
 # קריאת מפתח OpenRouter מ-Streamlit Secrets (אם קיים)
 AI_API_KEY = _get_secret("OPENROUTER_API_KEY", "PLACEHOLDER") or "PLACEHOLDER"
@@ -492,7 +521,8 @@ def init_session_state():
         st.session_state['AI_LOG'] = []
     if 'TOPIC' not in st.session_state:
         st.session_state['TOPIC'] = ""
-    if not isinstance(st.session_state.get('RESULTS', {}), dict):
+    if not isinstance(st.session_state.get('RESULTS', {}), dict) or \
+            ('RESULTS' in st.session_state and 'micmac_katz' not in st.session_state['RESULTS']):
         del st.session_state['RESULTS']  # תוצאות בפורמט ישן מסשן פעיל - יחושבו מחדש
     if 'AI_USAGE' not in st.session_state:
         st.session_state['AI_USAGE'] = {'calls': 0, 'input_tokens': 0, 'output_tokens': 0, 'cost': 0.0, 'history': []}
@@ -503,6 +533,41 @@ def init_session_state():
     if 'AI_PROVIDER' not in st.session_state:
         # אם מוגדר מפתח Anthropic ב-Secrets, זהו יהיה ספק ברירת המחדל
         st.session_state['AI_PROVIDER'] = 'anthropic' if st.session_state['ANTHROPIC_API_KEY'] else 'openrouter'
+    sync_from_db()
+
+def sync_from_db():
+    """
+    טוען מהמסד את הגדרות הפרויקט ואת כל תשובות המומחים, בכל ריצה של הסקריפט, כך
+    שתשובות שנשלחו ממכשירים אחרים מופיעות אצל המנהל. אם אוסף המומחים השתנה מאז
+    הניתוח האחרון, התוצאות השמורות בסשן נמחקות ויחושבו מחדש.
+    """
+    settings = storage.load_settings(DB_PATH)
+    if settings.get('FACTORS'):
+        st.session_state['FACTORS'] = settings['FACTORS']
+    for key in ('TOPIC', 'GENERIC_QUESTION'):
+        if key in settings:
+            st.session_state[key] = settings[key]
+
+    expert_data, justifications, citations = storage.load_experts(DB_PATH)
+    st.session_state['EXPERT_DATA'] = expert_data
+    st.session_state['JUSTIFICATIONS'] = justifications
+    st.session_state['CITATIONS'] = citations
+
+    results = st.session_state.get('RESULTS')
+    if results is not None and results.get('expert_ids') != frozenset(expert_data):
+        invalidate_results()
+
+def invalidate_results():
+    for k in ('RESULTS', 'SSIM_INIT', 'FINAL_SSIM'):
+        st.session_state.pop(k, None)
+    st.session_state['AI_LOG'] = []
+
+def analyze_and_store(ssim_init, conflicts):
+    """פותר קונפליקטים, מחשב את כל המטריצות ושומר את התוצאות בסשן יחד עם אוסף המומחים שעליו חושבו."""
+    _, irm, frm, micmac = solve_conflicts_and_finalize(ssim_init, conflicts)
+    results = build_analysis_results(irm, frm, micmac)
+    results['expert_ids'] = frozenset(st.session_state['EXPERT_DATA'])
+    st.session_state['RESULTS'] = results
 
 def record_ai_usage(input_tokens, output_tokens):
     """מתעד צריכת טוקנים ועלות של קריאה למודל בתשלום."""
@@ -572,112 +637,6 @@ def compute_ssim_density(ssim_df, factors):
             elif val not in ('O', ''):
                 non_o += 1
     return non_o, conflicts, total
-
-def compute_ism_levels(frm_df):
-    """
-    Level Partitioning קלאסי ל-ISM (Warfield): לכל גורם מחשבים קבוצת נגישות
-    (Reachability Set - מה שהוא מגיע אליו) וקבוצת קודמים (Antecedent Set - מי
-    מגיע אליו). גורם שייך לרמה הנוכחית אם חיתוך שתי הקבוצות שווה לקבוצת הנגישות
-    שלו. גורמים שנמצאים באותו מעגל השפעה הדדי (SCC) יוכנסו תמיד לאותה רמה,
-    ובכך נמנעת "הצפה" מלאכותית של הרמה ע"י מעגלים.
-    מחזיר רשימת רמות; levels[0] = הכי תלוי (Level I), levels[-1] = הכי מניע (השורש).
-    """
-    factors = list(frm_df.index)
-    remaining = set(factors)
-    levels = []
-
-    while remaining:
-        level_factors = []
-        for f in remaining:
-            reach = {g for g in remaining if frm_df.loc[f, g] == 1}
-            antecedent = {g for g in remaining if frm_df.loc[g, f] == 1}
-            if reach == (reach & antecedent):
-                level_factors.append(f)
-        if not level_factors:
-            level_factors = list(remaining)  # הגנה מפני לולאה אינסופית במקרה קצה לא תקין
-        levels.append(level_factors)
-        remaining -= set(level_factors)
-
-    return levels
-
-def ism_cycle_members(frm_df):
-    """גורמים שנמצאים במעגל השפעה הדדי: יש גורם אחר שהם מגיעים אליו וגם הוא מגיע אליהם."""
-    m = frm_df.values.copy()
-    np.fill_diagonal(m, 0)
-    mutual = (m == 1) & (m.T == 1)
-    return {f for f, row in zip(frm_df.index, mutual) if row.any()}
-
-def classify_micmac(dp, dep):
-    """מסווג כל גורם לרביע MICMAC לפי השוואה לממוצע ההשפעה (DP) והתלות (DEP)."""
-    micmac = pd.DataFrame({'DP': dp, 'DEP': dep})
-    avg_dp, avg_dep = dp.mean(), dep.mean()
-
-    def classify(row):
-        d, p = row['DP'], row['DEP']
-        if d > avg_dp and p <= avg_dep:
-            return 'Driving (מניע) 🚀'
-        if d > avg_dp and p > avg_dep:
-            return 'Linkage (קישור) 🔗'
-        if d <= avg_dp and p > avg_dep:
-            return 'Dependent (תלוי) 🎯'
-        return 'Autonomous (אוטונומי) 🏝️'
-
-    micmac['Classification'] = micmac.apply(classify, axis=1)
-    return micmac
-
-def compute_godet_micmac(irm_df, max_power=20):
-    """
-    MICMAC עקיף לפי Godet: מעלים את מטריצת ההשפעה הישירה (ללא אלכסון) בחזקות עד
-    שדירוג ההשפעה והתלות מתייצב. סגירה טרנזיטיבית בוליאנית (FRM) הופכת לכולה 1
-    ברגע שמעגל השפעה אחד עובר דרך רוב הגורמים, ואז DP/DEP זהים לכולם; ספירת
-    מסלולים ממשיכה להבחין בין הגורמים גם במצב כזה.
-    בגרף ללא מעגלים החזקות מתאפסות, ולכן נספרים כל המסלולים הישירים והעקיפים.
-    מחזיר (dp, dep, power) כאחוזים מסך ההשפעה.
-    """
-    M = irm_df.values.astype(float).copy()
-    np.fill_diagonal(M, 0)
-    power_k = M.copy()
-    cumulative = M.copy()
-    prev_rank, power, cyclic = None, 1, True
-    for k in range(2, max_power + 1):
-        power_k = power_k @ M
-        if not power_k.any():
-            cyclic = False
-            break
-        cumulative += power_k
-        power = k
-        rank = (tuple(np.argsort(-power_k.sum(axis=1), kind='stable')),
-                tuple(np.argsort(-power_k.sum(axis=0), kind='stable')))
-        if rank == prev_rank:
-            break
-        prev_rank = rank
-
-    basis = power_k if cyclic else cumulative
-    total = basis.sum()
-    if total == 0:
-        zeros = pd.Series(0.0, index=irm_df.index)
-        return zeros, zeros, power
-    dp = pd.Series(basis.sum(axis=1) / total * 100, index=irm_df.index)
-    dep = pd.Series(basis.sum(axis=0) / total * 100, index=irm_df.index)
-    return dp, dep, power
-
-def build_analysis_results(irm, frm_df, micmac):
-    """מרכז את כל תוצרי הניתוח, כולל מדד רוויה של ה-FRM וסיווג MICMAC עקיף (Godet)."""
-    n = len(frm_df)
-    off_diag = frm_df.values.copy()
-    np.fill_diagonal(off_diag, 0)
-    saturation = off_diag.sum() / (n * (n - 1)) if n > 1 else 0.0
-    dp_g, dep_g, power = compute_godet_micmac(irm)
-    classic_degenerate = saturation >= 0.8 or (micmac['DP'].nunique() == 1 and micmac['DEP'].nunique() == 1)
-    return {
-        'irm': irm,
-        'frm': frm_df,
-        'micmac': micmac,
-        'micmac_godet': classify_micmac(dp_g.round(1), dep_g.round(1)),
-        'godet_power': power,
-        'saturation': saturation,
-        'classic_degenerate': classic_degenerate,
-    }
 
 def calculate_ism_matrices():
     """מבצע את כל חישובי הליבה: אגרגציה וזיהוי קונפליקטים."""
@@ -787,19 +746,7 @@ def solve_conflicts_and_finalize(ssim, conflicts):
             if sym in ['V', 'X']:
                 irm.iloc[i, j] = 1
                 
-    frm = irm.values.copy()
-    n = len(factors)
-    while True:
-        prev_frm = frm.copy()
-        for i in range(n):
-            for j in range(n):
-                for k in range(n):
-                    if frm[i, k] == 1 and frm[k, j] == 1:
-                        frm[i, j] = 1
-        if np.array_equal(frm, prev_frm):
-            break
-
-    frm_df = pd.DataFrame(frm, index=factors, columns=factors)
+    frm_df = transitive_closure(irm)
 
     micmac = classify_micmac(frm_df.sum(axis=1), frm_df.sum(axis=0))
     st.session_state['SSIM_INIT'] = ssim.copy()  # מטריצה ראשונית עם קונפליקטים (C)
@@ -1081,8 +1028,8 @@ def _simulate_synthetic_expert(role_info, factors):
 
 def _inject_synthetic_data_or(role_info, matrix_data, factors, citations=[], instance_label=None):
     """הזנת נתונים סינתטיים עם מקורות מהאינטרנט."""
-    synth_id = f"Synth_{len([k for k in st.session_state['EXPERT_DATA'] if k.startswith('Synth_')]) + 1}"
-    
+    synth_id = f"Synth_{uuid.uuid4().hex[:10]}"
+
     responses, justs = {}, {}
     for f_i in factors:
         if f_i not in matrix_data:
@@ -1108,15 +1055,12 @@ def _inject_synthetic_data_or(role_info, matrix_data, factors, citations=[], ins
     display_name = f"סוכן AI - {role_info['role']}"
     if instance_label:
         display_name += f" {instance_label}"
-    st.session_state['EXPERT_DATA'][synth_id] = {
-        'name': display_name,
-        'role': role_info.get('expertise',''),
-        'responses': responses
-    }
-    for k, v in justs.items():
-        st.session_state['JUSTIFICATIONS'].setdefault(k, []).extend(v)
-    if citations:
-        st.session_state[f'CITATIONS_{synth_id}'] = citations
+    storage.save_expert(
+        synth_id, display_name, role_info.get('expertise', ''), responses,
+        justifications=[{'pair': pair, **j} for pair, items in justs.items() for j in items],
+        citations=citations, db_path=DB_PATH,
+    )
+    sync_from_db()
     return synth_id
 
 def _call_ai_with_context(prompt, extra_context=""):
@@ -1239,7 +1183,7 @@ def _render_factor_research():
         editor_df,
         key=f"factor_recs_editor_{st.session_state.get('AI_FACTOR_RECS_VERSION', 0)}",
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
         disabled=["תיאור", "נימוק"],
         column_config={"לכלול": st.column_config.CheckboxColumn("לכלול", width="small")},
     )
@@ -1293,7 +1237,7 @@ def _render_ai_usage_live():
         "(לא כולל cache). הנתונים נשמרים לסשן הנוכחי בלבד."
     )
     if usage['history']:
-        st.dataframe(pd.DataFrame(usage['history'][::-1]), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(usage['history'][::-1]), width="stretch", hide_index=True)
     else:
         st.info("טרם בוצעו קריאות למודל בתשלום בסשן זה.")
 
@@ -1356,6 +1300,73 @@ def _render_ai_engine_tab():
 # ==============================================================================
 # V. מסכים (Screens)
 # ==============================================================================
+def build_excel_report():
+    """דוח Excel מלא: נתוני המומחים, הנימוקים ויומן ה-AI, ואם הורץ ניתוח - גם כל המטריצות, הרמות ושלוש שיטות ה-MICMAC."""
+    factors = st.session_state['FACTORS']
+    expert_data = st.session_state['EXPERT_DATA']
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+        pd.DataFrame(
+            [{'מזהה': k, 'שם': v['name'], 'תפקיד': v['role']} for k, v in expert_data.items()],
+            columns=['מזהה', 'שם', 'תפקיד'],
+        ).to_excel(writer, sheet_name='מומחים', index=False)
+
+        all_responses = []
+        for expert_info in expert_data.values():
+            row = {'שם המומחה': expert_info['name'], 'תפקיד': expert_info['role']}
+            for i in range(len(factors)):
+                for j in range(i + 1, len(factors)):
+                    f_i, f_j = factors[i], factors[j]
+                    row[f"{f_i} → {f_j}"] = expert_info['responses'].get(f_i, {}).get(f_j, 'O')
+            all_responses.append(row)
+        if all_responses:
+            pd.DataFrame(all_responses).to_excel(writer, sheet_name='תשובות_מומחים', index=False)
+
+        just_records = [
+            {'זוג גורמים': f"{pair[0]} ↔ {pair[1]}", 'מומחה': j['expert'], 'סמל': j['symbol'], 'נימוק': j['text']}
+            for pair, justs in st.session_state['JUSTIFICATIONS'].items() for j in justs
+        ]
+        if just_records:
+            pd.DataFrame(just_records).to_excel(writer, sheet_name='נימוקים', index=False)
+
+        citation_records = [
+            {'סוכן': expert_data[exp_id]['name'], 'מקור': json.dumps(c, ensure_ascii=False) if isinstance(c, dict) else str(c)}
+            for exp_id, cites in st.session_state.get('CITATIONS', {}).items() if exp_id in expert_data for c in cites
+        ]
+        if citation_records:
+            pd.DataFrame(citation_records).to_excel(writer, sheet_name='מקורות_סוכנים', index=False)
+
+        if st.session_state['AI_LOG']:
+            pd.DataFrame(st.session_state['AI_LOG']).to_excel(writer, sheet_name='לוג_AI', index=False)
+
+        results = st.session_state.get('RESULTS')
+        if results:
+            if 'SSIM_INIT' in st.session_state:
+                st.session_state['SSIM_INIT'].to_excel(writer, sheet_name='SSIM_ראשוני')
+            if 'FINAL_SSIM' in st.session_state:
+                st.session_state['FINAL_SSIM'].to_excel(writer, sheet_name='SSIM_סופי')
+            results['irm'].to_excel(writer, sheet_name='IRM')
+            results['frm'].to_excel(writer, sheet_name='FRM')
+
+            frm = results['frm']
+            cycles = ism_cycle_members(frm)
+            pd.DataFrame([
+                {'רמה': idx + 1, 'גורם': f, 'במעגל השפעה הדדי': 'כן' if f in cycles else ''}
+                for idx, lvl in enumerate(compute_ism_levels(frm)) for f in lvl
+            ]).to_excel(writer, sheet_name='רמות_ISM', index=False)
+
+            for key, sheet in (('micmac', 'MICMAC_קלאסי'), ('micmac_godet', 'MICMAC_Godet'), ('micmac_katz', 'MICMAC_Katz')):
+                results[key].sort_values('DP', ascending=False).to_excel(writer, sheet_name=sheet)
+
+            pd.DataFrame([
+                {'מדד': 'רוויית FRM (מחוץ לאלכסון)', 'ערך': round(results['saturation'], 4)},
+                {'מדד': 'FRM מנוון לסיווג קלאסי', 'ערך': 'כן' if results['classic_degenerate'] else 'לא'},
+                {'מדד': 'חזקת מטריצה (Godet)', 'ערך': results['godet_power']},
+                {'מדד': 'מקדם דעיכה α (Katz)', 'ערך': round(results['katz_alpha'], 6)},
+                {'מדד': 'מספר מומחים בניתוח', 'ערך': len(results.get('expert_ids', ()))},
+            ]).to_excel(writer, sheet_name='סיכום_ניתוח', index=False)
+    return buffer.getvalue()
+
 def screen_login():
     """מסך הכניסה הראשי."""
     st.markdown("<br>", unsafe_allow_html=True)
@@ -1367,11 +1378,13 @@ def screen_login():
     with c1:
         with st.container(border=True):
             st.markdown("<span class='login-card-badge badge-admin'>🔐 כניסת מנהל מערכת</span>", unsafe_allow_html=True)
+            if not ADMIN_PASSWORD:
+                st.warning("כניסת מנהל חסומה: לא הוגדרה סיסמה. הוסף `ADMIN_PASSWORD` (ואופציונלית `ADMIN_USERNAME`) לקובץ `.streamlit/secrets.toml` או כמשתנה סביבה, והפעל מחדש.")
             with st.form("admin_login"):
                 u = st.text_input("שם משתמש", placeholder="admin")
                 p = st.text_input("סיסמה", type="password")
                 if st.form_submit_button("התחבר כמנהל"):
-                    if u == ADMIN_USERNAME and p == ADMIN_PASSWORD:
+                    if check_admin_credentials(u, p):
                         st.session_state['role'] = 'Admin'
                         st.rerun()
                     else:
@@ -1387,7 +1400,7 @@ def screen_login():
 
                 if st.form_submit_button("התחל שאלון >>"):
                     if name and role:
-                        new_id = f"Exp_{len(st.session_state['EXPERT_DATA']) + 1}"
+                        new_id = f"Exp_{uuid.uuid4().hex[:10]}"
                         st.session_state['current_expert_id'] = new_id
                         st.session_state['current_expert_name'] = name
                         st.session_state['current_expert_role'] = role
@@ -1447,21 +1460,13 @@ def screen_expert_form():
         if st.form_submit_button("💾 שמור ושלח את כל התשובות"):
             exp_id = st.session_state['current_expert_id']
             clean_res = {fi: {fj: data['s'] for fj, data in row.items()} for fi, row in responses.items()}
-            st.session_state['EXPERT_DATA'][exp_id] = {
-                'name': exp_name,
-                'role': st.session_state['current_expert_role'],
-                'responses': clean_res
-            }
-            
-            for fi, row in responses.items():
-                for fj, data in row.items():
-                    if data['t']:
-                        pair = (fi, fj)
-                        entry = {'expert': exp_name, 'symbol': data['s'], 'text': data['t']}
-                        if pair not in st.session_state['JUSTIFICATIONS']:
-                            st.session_state['JUSTIFICATIONS'][pair] = []
-                        st.session_state['JUSTIFICATIONS'][pair].append(entry)
-                            
+            justs = [
+                {'pair': (fi, fj), 'expert': exp_name, 'symbol': data['s'], 'text': data['t']}
+                for fi, row in responses.items() for fj, data in row.items() if data['t']
+            ]
+            storage.save_expert(exp_id, exp_name, st.session_state['current_expert_role'],
+                                clean_res, justifications=justs, db_path=DB_PATH)
+
             st.success("✅ התשובות נקלטו בהצלחה! תודה רבה.")
             time.sleep(2)
             st.session_state['role'] = None
@@ -1486,10 +1491,7 @@ def screen_admin_dashboard():
         
         if has_synth_data:
             if st.button("️ מחק נתוני סוכני AI", key="btn_clear_synth_sidebar", type="secondary"):
-                st.session_state['EXPERT_DATA'] = {
-                    k: v for k, v in st.session_state['EXPERT_DATA'].items()
-                    if not k.startswith('Synth_')
-                }
+                storage.delete_experts(prefix='Synth_', db_path=DB_PATH)
                 st.success("✅ נתוני הסוכנים נמחקו!")
                 st.rerun()
         
@@ -1497,7 +1499,8 @@ def screen_admin_dashboard():
             factors_backup = st.session_state.get('FACTORS', [])
             topic_backup = st.session_state.get('TOPIC', '')
             question_backup = st.session_state.get('GENERIC_QUESTION', DEFAULT_GENERIC_QUESTION)
-            
+            storage.delete_experts(db_path=DB_PATH)
+
             for key in list(st.session_state.keys()):
                 if key not in ['FACTORS', 'TOPIC', 'GENERIC_QUESTION', 'role']:
                     del st.session_state[key]
@@ -1543,12 +1546,13 @@ def screen_admin_dashboard():
                 st.session_state['FACTORS'] = cleaned
                 st.session_state['GENERIC_QUESTION'] = new_q
                 st.session_state['TOPIC'] = topic_input
+                storage.save_settings({'FACTORS': cleaned, 'GENERIC_QUESTION': new_q, 'TOPIC': topic_input}, DB_PATH)
 
+                storage.delete_experts(db_path=DB_PATH)
                 st.session_state['EXPERT_DATA'] = {}
                 st.session_state['JUSTIFICATIONS'] = {}
-                st.session_state['AI_LOG'] = []
-                for k in ('RESULTS', 'SSIM_INIT', 'FINAL_SSIM'):
-                    st.session_state.pop(k, None)
+                st.session_state['CITATIONS'] = {}
+                invalidate_results()
                 st.success("✅ הגדרות עודכנו בהצלחה! (כל הנתונים הקודמים אופסו)")
             else:
                 st.error("לא ניתן לשמור רשימה ריקה.")
@@ -1564,59 +1568,16 @@ def screen_admin_dashboard():
             st.warning("טרם התקבלו תשובות ממומחים.")
         else:
             df = pd.DataFrame.from_dict(data, orient='index')[['name', 'role']]
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(df, width="stretch")
             c1, c2 = st.columns(2)
             c1.metric("סה\"כ משיבים", len(data))
             if c2.button("🗑️ מחק את כל הנתונים", key="btn_clear_all_tab2"):
-                st.session_state['EXPERT_DATA'] = {}
-                st.session_state['JUSTIFICATIONS'] = {}
+                storage.delete_experts(db_path=DB_PATH)
                 st.rerun()
-            
-            buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                df.to_excel(writer, sheet_name='מומחים', index=False)
-                
-                if st.session_state['EXPERT_DATA']:
-                    all_responses = []
-                    factors = st.session_state['FACTORS']
-                    
-                    for exp_id, expert_info in st.session_state['EXPERT_DATA'].items():
-                        expert_name = expert_info['name']
-                        expert_role = expert_info['role']
-                        responses = expert_info['responses']
-                        
-                        row = {'שם המומחה': expert_name, 'תפקיד': expert_role}
-                        
-                        for i in range(len(factors)):
-                            for j in range(i+1, len(factors)):
-                                f_i, f_j = factors[i], factors[j]
-                                answer = responses.get(f_i, {}).get(f_j, 'O')
-                                col_name = f"{f_i} → {f_j}"
-                                row[col_name] = answer
-                        
-                        all_responses.append(row)
-                    
-                    if all_responses:
-                        pd.DataFrame(all_responses).to_excel(writer, sheet_name='תשובות_מומחים', index=False)
-                
-                if st.session_state['JUSTIFICATIONS']:
-                    just_records = []
-                    for pair, justs in st.session_state['JUSTIFICATIONS'].items():
-                        for j in justs:
-                            just_records.append({
-                                'זוג גורמים': f"{pair[0]} ↔ {pair[1]}",
-                                'מומחה': j['expert'],
-                                'סמל': j['symbol'],
-                                'נימוק': j['text']
-                            })
-                    pd.DataFrame(just_records).to_excel(writer, sheet_name='נימוקים', index=False)
-                
-                if st.session_state['AI_LOG']:
-                    pd.DataFrame(st.session_state['AI_LOG']).to_excel(writer, sheet_name='לוג_AI', index=False)
             
             st.download_button(
                 label="📥 הורד דוח נתונים מלא ל-Excel",
-                data=buffer.getvalue(),
+                data=build_excel_report(),
                 file_name=f"ISM_Report_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key="btn_download_excel"
@@ -1642,7 +1603,7 @@ def screen_admin_dashboard():
                 stats_df = compute_expert_symbol_stats(factors_for_stats)
                 if not stats_df.empty:
                     display_df = stats_df.drop(columns=["_non_o_pct"])
-                    st.dataframe(display_df, use_container_width=True, hide_index=True)
+                    st.dataframe(display_df, width="stretch", hide_index=True)
                     biased = stats_df[stats_df["_non_o_pct"] > 70]
                     if not biased.empty:
                         names = ", ".join(biased["מומחה/סוכן"])
@@ -1657,13 +1618,11 @@ def screen_admin_dashboard():
                 
                 if st.button(f"🤖 הפעל AI לפתרון {len(conflicts)} קונפליקטים", key="btn_solve_conflicts"):
                     with st.spinner("ה-AI מנתח נימוקים ומבצע חישובים..."):
-                        final_ssim, irm, frm, micmac = solve_conflicts_and_finalize(ssim_init, conflicts)
-                        st.session_state['RESULTS'] = build_analysis_results(irm, frm, micmac)
+                        analyze_and_store(ssim_init, conflicts)
                         st.rerun()
 
             elif not conflicts and 'RESULTS' not in st.session_state:
-                final_ssim, irm, frm, micmac = solve_conflicts_and_finalize(ssim_init, [])
-                st.session_state['RESULTS'] = build_analysis_results(irm, frm, micmac)
+                analyze_and_store(ssim_init, [])
                 st.rerun()
 
             if 'RESULTS' in st.session_state:
@@ -1679,7 +1638,7 @@ def screen_admin_dashboard():
                 if 'SSIM_INIT' in st.session_state:
                     with st.expander("🔍 מטריצת קשרים ראשונית (SSIM) - לפני פתרון קונפליקטים", expanded=False):
                         st.info("💡 **מקרא:** V=משפיע על, A=מושפע מ, X=הדדי, O=אין קשר, **C=קונפליקט** (דורש הכרעת AI)")
-                        st.dataframe(st.session_state['SSIM_INIT'].style.map(color_ssim_conflicts), use_container_width=True)
+                        st.dataframe(st.session_state['SSIM_INIT'].style.map(color_ssim_conflicts), width="stretch")
                         
                         # ספירת קונפליקטים
                         conflict_count = (st.session_state['SSIM_INIT'] == 'C').sum().sum()
@@ -1690,14 +1649,14 @@ def screen_admin_dashboard():
                 if 'FINAL_SSIM' in st.session_state:
                     with st.expander("✅ מטריצת קשרים סופית (SSIM) - אחרי פתרון קונפליקטים", expanded=False):
                         st.info("💡 **מקרא:** V=משפיע על, A=מושפע מ, X=הדדי, O=אין קשר")
-                        st.dataframe(st.session_state['FINAL_SSIM'], use_container_width=True)
+                        st.dataframe(st.session_state['FINAL_SSIM'], width="stretch")
                 
                 with st.expander("➡️ מטריצת נגישות ראשונית (IRM) - השפעות ישירות בלבד", expanded=False):
-                    st.dataframe(irm, use_container_width=True)
+                    st.dataframe(irm, width="stretch")
 
                 with st.expander("🎯 מטריצת נגישות סופית (FRM) - עם טרנזיטיביות", expanded=False):
                     st.info("💡 מציגה השפעות ישירות **ועקיפות** בין גורמים")
-                    st.dataframe(frm, use_container_width=True)
+                    st.dataframe(frm, width="stretch")
 
                 if results['classic_degenerate']:
                     st.warning(
@@ -1711,7 +1670,7 @@ def screen_admin_dashboard():
                 if st.session_state['AI_LOG']:
                     st.markdown("---")
                     st.markdown("### 🧠 דוח החלטות ה-AI")
-                    st.dataframe(pd.DataFrame(st.session_state['AI_LOG']), use_container_width=True)
+                    st.dataframe(pd.DataFrame(st.session_state['AI_LOG']), width="stretch")
 
     # --- טאב 3: תוצאות ---
     with tab3:
@@ -1726,40 +1685,43 @@ def screen_admin_dashboard():
             if len(levels) == 1 and len(frm) > 1:
                 st.warning("⚠️ כל הגורמים נמצאים ברמה אחת: כולם מגיעים זה לזה דרך מעגלי השפעה, ולכן אין היררכיה. זה משקף צפיפות קשרים גבוהה בתשובות - ראה 'בדיקת צפיפות ואבחון תשובות' בטאב 'מעקב וניתוח'.")
             fig_h = plot_ism_hierarchy(levels, irm, cycles)
-            st.plotly_chart(fig_h, use_container_width=True)
+            st.plotly_chart(fig_h, width="stretch")
             with st.expander("📋 טבלת רמות"):
                 level_rows = []
                 for idx, lvl in enumerate(levels):
                     in_cycle = [f for f in lvl if f in cycles]
                     tag = f" (מעגל השפעה הדדי: {', '.join(in_cycle)})" if in_cycle else ""
                     level_rows.append({"רמה": f"Level {idx + 1}", "גורמים": ", ".join(lvl) + tag})
-                st.dataframe(pd.DataFrame(level_rows), use_container_width=True, hide_index=True)
+                st.dataframe(pd.DataFrame(level_rows), width="stretch", hide_index=True)
 
             st.markdown("---")
             st.markdown("### 📊 מפת MICMAC ויזואלית")
             method_labels = {
                 'classic': "ISM-MICMAC קלאסי (סכומי FRM)",
                 'godet': f"MICMAC עקיף - Godet (חזקת מטריצה {results['godet_power']})",
+                'katz': f"MICMAC עקיף מצטבר - Katz (α={results['katz_alpha']:.3g})",
             }
             method = st.radio(
                 "שיטת חישוב ההשפעה והתלות",
                 options=list(method_labels.keys()),
                 format_func=method_labels.get,
-                index=1 if results['classic_degenerate'] else 0,
+                index=2 if results['classic_degenerate'] else 0,
                 horizontal=True,
                 key="micmac_method",
             )
             if results['classic_degenerate']:
-                st.info(f"ℹ️ ה-FRM רווי ({results['saturation']:.0%} מהתאים הם 1), ולכן בשיטה הקלאסית כמעט לכל הגורמים יש אותם DP ו-DEP. ברירת המחדל כאן היא MICMAC עקיף לפי Godet, שסופר מסלולי השפעה ישירים ועקיפים ומבחין בין הגורמים גם במצב כזה.")
+                st.info(f"ℹ️ ה-FRM רווי ({results['saturation']:.0%} מהתאים הם 1), ולכן בשיטה הקלאסית כמעט לכל הגורמים יש אותם DP ו-DEP. ברירת המחדל כאן היא MICMAC עקיף מצטבר (Katz), שסופר מסלולי השפעה מכל אורך עם דעיכה ומבחין בין הגורמים גם במצב כזה.")
             if method == 'godet':
-                st.caption("ערכי DP/DEP בשיטה זו הם אחוז מסך ההשפעה במערכת (מחושב מחזקות מטריצת ההשפעה הישירה עד להתייצבות הדירוג).")
-            micmac = results['micmac_godet'] if method == 'godet' else results['micmac']
+                st.caption("ערכי DP/DEP בשיטה זו הם אחוז מסך ההשפעה במערכת (מחושב מחזקות מטריצת ההשפעה הישירה עד להתייצבות הדירוג). במעגל השפעה קצר החזקה הבודדת עלולה להתנודד - במקרה כזה עדיפה שיטת Katz.")
+            elif method == 'katz':
+                st.caption("ערכי DP/DEP בשיטה זו הם אחוז מסך ההשפעה במערכת, מחושב מסכום כל המסלולים: Σ α^k·M^k = (I − αM)⁻¹ − I, כאשר α = 0.5/ρ(M). מסלול ארוך מקבל משקל קטן יותר, ואין תנודות במעגלים קצרים.")
+            micmac = results[{'classic': 'micmac', 'godet': 'micmac_godet', 'katz': 'micmac_katz'}[method]]
             fig = plot_interactive_micmac(micmac)
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
             st.markdown("---")
             st.markdown("### 🏆 נתונים מספריים וסיווג")
-            st.dataframe(micmac.sort_values('DP', ascending=False).style.map(color_micmac, subset=['Classification']), use_container_width=True)
+            st.dataframe(micmac.sort_values('DP', ascending=False).style.map(color_micmac, subset=['Classification']), width="stretch")
 
             drivers = micmac[micmac['Classification'].str.contains('Driving')]
             if not drivers.empty:
@@ -1767,6 +1729,14 @@ def screen_admin_dashboard():
 
             with st.expander("צפה במטריצת הנגישות הסופית (FRM)"):
                 st.dataframe(frm)
+
+            st.download_button(
+                label="📥 הורד דוח מלא ל-Excel (נתונים + תוצאות)",
+                data=build_excel_report(),
+                file_name=f"ISM_Report_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="btn_download_excel_results"
+            )
         else:
             st.info("אנא הרץ ניתוח בטאב הקודם.")
 
@@ -1888,10 +1858,7 @@ def screen_admin_dashboard():
                     st.info(f"📊 קיימים {len([k for k in st.session_state['EXPERT_DATA'] if k.startswith('Synth_')])} מומחים סינתטיים במערכת")
                 with col_b:
                     if st.button("🗑️ מחק רק מומחים סינתטיים", key="btn_clear_synth_v3"):
-                        st.session_state['EXPERT_DATA'] = {
-                            k: v for k, v in st.session_state['EXPERT_DATA'].items()
-                            if not k.startswith('Synth_')
-                        }
+                        storage.delete_experts(prefix='Synth_', db_path=DB_PATH)
                         st.success("✅ נתוני הסוכנים נמחקו!")
                         st.rerun()
             
