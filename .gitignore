@@ -4,3 +4,4 @@ __pycache__/
 ism_data.db
 ism_data.db-*
 .pytest_cache/
+sim_runs/

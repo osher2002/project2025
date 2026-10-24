@@ -80,11 +80,21 @@ AI_API_KEY = _get_secret("OPENROUTER_API_KEY", "PLACEHOLDER") or "PLACEHOLDER"
 AI_MODEL_NAME = "google/gemma-4-31b-it:free"
 
 # מודל Claude (Anthropic) - משמש כסוכן AI חלופי (איכות גבוהה, בתשלום)
-ANTHROPIC_MODEL_NAME = "claude-sonnet-5"
-ANTHROPIC_EFFORT = "medium"
-# תמחור Claude Sonnet 5 (דולר למיליון טוקנים)
-ANTHROPIC_PRICE_INPUT_PER_M = 2.00
-ANTHROPIC_PRICE_OUTPUT_PER_M = 10.00
+ANTHROPIC_MODEL_NAME = _get_secret("ANTHROPIC_MODEL", "claude-sonnet-5-5")
+ANTHROPIC_EFFORT = _get_secret("ANTHROPIC_EFFORT", "medium")
+# תמחור (דולר למיליון טוקנים: קלט, פלט). מודל fallback שענה במקום המודל הראשי מתומחר לפי עצמו.
+ANTHROPIC_PRICES = {
+    "claude-sonnet-5-5": (2.00, 10.00),
+    "claude-sonnet-5": (2.00, 10.00),
+    "claude-opus-5-5": (4.00, 20.00),
+    "claude-opus-5": (5.00, 25.00),
+    "claude-opus-4-8": (5.00, 25.00),
+    "claude-haiku-5-5": (0.10, 0.50),
+}
+ANTHROPIC_PRICE_INPUT_PER_M, ANTHROPIC_PRICE_OUTPUT_PER_M = ANTHROPIC_PRICES.get(ANTHROPIC_MODEL_NAME, (2.00, 10.00))
+# מודלים שתומכים ב-fallback בצד השרת (מריץ מחדש בקשה שנדחתה ע"י מסווגי הבטיחות על מודל חלופי)
+ANTHROPIC_SERVER_FALLBACK_MODELS = {"claude-sonnet-5-5", "claude-opus-5-5", "claude-opus-5", "claude-fable-5-1"}
+ANTHROPIC_MAX_TOKENS = 16000  # החשיבה נספרת בתוך max_tokens; תקרה נמוכה קוטעת תשובות JSON ארוכות של הסוכנים
 
 # נתוני ברירת מחדל
 DEFAULT_FACTORS = [
@@ -569,9 +579,10 @@ def analyze_and_store(ssim_init, conflicts):
     results['expert_ids'] = frozenset(st.session_state['EXPERT_DATA'])
     st.session_state['RESULTS'] = results
 
-def record_ai_usage(input_tokens, output_tokens):
-    """מתעד צריכת טוקנים ועלות של קריאה למודל בתשלום."""
-    cost = (input_tokens * ANTHROPIC_PRICE_INPUT_PER_M + output_tokens * ANTHROPIC_PRICE_OUTPUT_PER_M) / 1_000_000
+def record_ai_usage(input_tokens, output_tokens, model=None, seconds=None, stop_reason=None):
+    """מתעד צריכת טוקנים, עלות וזמן תגובה של קריאה למודל בתשלום."""
+    price_in, price_out = ANTHROPIC_PRICES.get(model or ANTHROPIC_MODEL_NAME, (ANTHROPIC_PRICE_INPUT_PER_M, ANTHROPIC_PRICE_OUTPUT_PER_M))
+    cost = (input_tokens * price_in + output_tokens * price_out) / 1_000_000
     usage = st.session_state['AI_USAGE']
     usage['calls'] += 1
     usage['input_tokens'] += input_tokens
@@ -579,8 +590,11 @@ def record_ai_usage(input_tokens, output_tokens):
     usage['cost'] += cost
     usage['history'].append({
         "זמן": datetime.datetime.now().strftime("%H:%M:%S"),
+        "מודל": model or ANTHROPIC_MODEL_NAME,
         "טוקני קלט": input_tokens,
         "טוקני פלט": output_tokens,
+        "שניות": round(seconds, 2) if seconds is not None else None,
+        "סיום": stop_reason,
         "עלות ($)": round(cost, 5),
     })
 
@@ -795,7 +809,10 @@ def _call_openrouter(full_prompt, system_context):
             time.sleep(2)
 
 def _call_anthropic(full_prompt, system_context):
-    """שולח בקשה ל-Claude Sonnet 5 (Anthropic) כסוכן AI לאיכות גבוהה."""
+    """
+    שולח בקשה ל-Claude (ברירת מחדל: Sonnet 5.5) כסוכן AI לאיכות גבוהה.
+    ה-SDK מנסה שוב בעצמו על 429/5xx/ניתוק (max_retries); שגיאות 4xx אחרות (מפתח, הרשאה, בקשה) לא חוזרות על עצמן.
+    """
     if not ANTHROPIC_AVAILABLE:
         raise Exception("ספריית anthropic לא מותקנת (הוסף 'anthropic' ל-requirements.txt)")
 
@@ -805,28 +822,33 @@ def _call_anthropic(full_prompt, system_context):
 
     workspace_id = st.session_state.get('ANTHROPIC_WORKSPACE_ID', '').strip()
     extra_headers = {"anthropic-workspace-id": workspace_id} if workspace_id else None
-    client = anthropic.Anthropic(api_key=api_key, default_headers=extra_headers)
+    client = anthropic.Anthropic(api_key=api_key, default_headers=extra_headers, max_retries=4, timeout=300)
 
-    for attempt in range(3):
-        try:
-            response = client.messages.create(
-                model=ANTHROPIC_MODEL_NAME,
-                max_tokens=3000,
-                system=system_context,
-                output_config={"effort": ANTHROPIC_EFFORT},
-                messages=[{"role": "user", "content": full_prompt}]
-            )
-            record_ai_usage(response.usage.input_tokens, response.usage.output_tokens)
-            return "".join(b.text for b in response.content if b.type == "text")
-        except Exception:
-            if attempt == 2:
-                raise
-            time.sleep(2)
+    params = dict(
+        model=ANTHROPIC_MODEL_NAME,
+        max_tokens=ANTHROPIC_MAX_TOKENS,
+        system=system_context,
+        output_config={"effort": ANTHROPIC_EFFORT},
+        messages=[{"role": "user", "content": full_prompt}],
+    )
+    started = time.perf_counter()
+    if ANTHROPIC_MODEL_NAME in ANTHROPIC_SERVER_FALLBACK_MODELS:
+        response = client.beta.messages.create(betas=["server-side-fallback-2026-07-01"], fallbacks="default", **params)
+    else:
+        response = client.messages.create(**params)
+    elapsed = time.perf_counter() - started
+
+    record_ai_usage(response.usage.input_tokens, response.usage.output_tokens,
+                    model=response.model, seconds=elapsed, stop_reason=response.stop_reason)
+    if response.stop_reason == "refusal":
+        category = getattr(getattr(response, "stop_details", None), "category", None)
+        raise RuntimeError(f"המודל סירב לבקשה (קטגוריה: {category}). נסה לנסח את הנושא מחדש.")
+    return "".join(b.text for b in response.content if b.type == "text")
 
 def call_ai_unified(prompt, system_context="", use_search=False, search_query=None):
     """
     פונקציית-העל היחידה לכל קריאות ה-AI באפליקציה.
-    מנתבת לספק שנבחר (OpenRouter החינמי או Claude Sonnet 5 של Anthropic).
+    מנתבת לספק שנבחר (OpenRouter החינמי או Claude של Anthropic, לפי ANTHROPIC_MODEL).
     מחזירה: (תשובה, רשימת מקורות)
     """
     provider = st.session_state.get('AI_PROVIDER', 'openrouter')
@@ -1234,7 +1256,8 @@ def _render_ai_usage_live():
     st.caption(
         f"תמחור {ANTHROPIC_MODEL_NAME}: ${ANTHROPIC_PRICE_INPUT_PER_M:.2f} למיליון טוקני קלט, "
         f"${ANTHROPIC_PRICE_OUTPUT_PER_M:.2f} למיליון טוקני פלט. העלות מחושבת לפי הצריכה שדווחה ע\"י ה-API, בקירוב "
-        "(לא כולל cache). הנתונים נשמרים לסשן הנוכחי בלבד."
+        "(לא כולל cache). אם מודל חלופי ענה במקום (fallback אחרי סירוב), הקריאה מתומחרת לפי המודל שענה. "
+        "הנתונים נשמרים לסשן הנוכחי בלבד."
     )
     if usage['history']:
         st.dataframe(pd.DataFrame(usage['history'][::-1]), width="stretch", hide_index=True)
@@ -1248,7 +1271,7 @@ def _render_ai_engine_tab():
 
     provider_options = {
         'openrouter': "🆓 חינמי — OpenRouter (Gemma)",
-        'anthropic': "⭐ בתשלום — Anthropic Claude Sonnet 5 (effort: medium)",
+        'anthropic': f"⭐ בתשלום — Anthropic {ANTHROPIC_MODEL_NAME} (effort: {ANTHROPIC_EFFORT})",
     }
     current = st.session_state.get('AI_PROVIDER', 'openrouter')
     selected = st.radio(
