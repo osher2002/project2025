@@ -21,6 +21,8 @@ The local database lives in `%USERPROFILE%\.ism_micmac\ism_data.db`. The locatio
    - Use only Python code, with no Windows-only paths or tools, so it also runs on Linux.
    - The Streamlit Cloud filesystem is ephemeral, so the SQLite file is wiped whenever the app restarts there.
 3. Add or extend tests in `tests/` for new behavior. Pure logic goes in `ism_core.py`, persistence in `storage.py`, and full-app flows in `tests/test_app_smoke.py` (AppTest).
+   - Pin only versions that support Python 3.11 through 3.13. CI tests all three, because Streamlit Cloud apps keep whatever Python version they were deployed with. This is why numpy is pinned at 2.4.x: 2.5 needs Python 3.12 or newer.
+   - The other runtimes must keep working too: `.devcontainer/devcontainer.json` (Codespaces, Python 3.12) and `Dockerfile` (python:3.12-slim, database at `/data`). CI builds and starts the Docker image.
 4. Commit on a feature branch, then push. The user's fork is `osher2002/project2025`, and PRs target `matanrauf1-lgtm/project2025` main.
 
 ## Code layout

@@ -5,14 +5,51 @@ on:
   pull_request:
 
 jobs:
+  # Every Python version Streamlit Cloud may run the app on (it is picked when the app is deployed)
   pytest:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
           cache: pip
       - run: pip install -r requirements.txt pytest
-      - run: python -m py_compile project2025.py
+      - run: pip check
+      - run: python -m py_compile project2025.py ism_core.py storage.py
       - run: pytest -q
+
+  # The same image GitHub Codespaces uses (.devcontainer/devcontainer.json)
+  devcontainer:
+    runs-on: ubuntu-latest
+    container: mcr.microsoft.com/devcontainers/python:1-3.12-bookworm
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip3 install -r requirements.txt pytest
+      - run: pytest -q
+
+  # Build the Docker image, start it, and wait for the health endpoint and the page
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t ism-micmac .
+      - run: docker run -d --name app -p 8501:8501 -e ADMIN_PASSWORD=ci-check ism-micmac
+      - name: wait for health
+        run: |
+          for i in $(seq 1 60); do
+            if [ "$(curl -s http://localhost:8501/_stcore/health)" = "ok" ]; then echo "healthy after ${i}s"; break; fi
+            sleep 1
+          done
+          test "$(curl -s http://localhost:8501/_stcore/health)" = "ok"
+          curl -sf -o /dev/null http://localhost:8501/
+          test "$(docker inspect -f '{{.State.Running}}' app)" = "true"
+      - name: app code loads inside the image and the database is writable
+        run: |
+          docker exec app python -c "import ism_core, storage, project2025, os; assert os.path.exists('/data/ism_data.db'); print('app import ok, db at /data')"
+      - if: always()
+        run: docker logs app

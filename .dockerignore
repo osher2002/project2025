@@ -1,0 +1,12 @@
+.git
+.github
+.devcontainer
+.streamlit/secrets.toml
+__pycache__
+*.pyc
+.pytest_cache
+tests
+ism_data.db*
+*.docx
+*.pdf
+*.tgz

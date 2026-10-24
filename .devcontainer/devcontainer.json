@@ -1,11 +1,10 @@
 {
-  "name": "Python 3",
-  // Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
-  "image": "mcr.microsoft.com/devcontainers/python:1-3.11-bookworm",
+  "name": "ISM-MICMAC (Python 3.12)",
+  // אותה גרסת Python כמו ב-CI וב-Dockerfile. התלויות מגיעות רק מ-requirements.txt (גרסאות מקובעות).
+  "image": "mcr.microsoft.com/devcontainers/python:1-3.12-bookworm",
   "customizations": {
     "codespaces": {
       "openFiles": [
-        "README.md",
         "project2025.py"
       ]
     },
@@ -17,7 +16,19 @@
       ]
     }
   },
-  "updateContentCommand": "[ -f packages.txt ] && sudo apt update && sudo apt upgrade -y && sudo xargs apt install -y <packages.txt; [ -f requirements.txt ] && pip3 install --user -r requirements.txt; pip3 install --user streamlit; echo '✅ Packages installed and Requirements met'",
+  // סודות של Codespaces מגיעים כמשתני סביבה, והאפליקציה קוראת אותם (_get_secret). בלי ADMIN_PASSWORD כניסת המנהל חסומה.
+  "secrets": {
+    "ADMIN_PASSWORD": {
+      "description": "סיסמת כניסת המנהל לאפליקציה"
+    },
+    "ANTHROPIC_API_KEY": {
+      "description": "אופציונלי: מפתח Claude (אפשר גם להזין בממשק)"
+    },
+    "OPENROUTER_API_KEY": {
+      "description": "אופציונלי: מפתח למודל החינמי"
+    }
+  },
+  "updateContentCommand": "[ -f packages.txt ] && sudo apt update && sudo apt upgrade -y && sudo xargs apt install -y <packages.txt; pip3 install --user -r requirements.txt pytest && echo '✅ Packages installed and Requirements met'",
   "postAttachCommand": {
     "server": "streamlit run project2025.py --server.enableCORS false --server.enableXsrfProtection false"
   },
