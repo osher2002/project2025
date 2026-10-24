@@ -8,6 +8,7 @@ Communicate with the user in Hebrew.
 
 - `.\dev.ps1 setup`: run once. It creates the venv at `%USERPROFILE%\.venvs\project2025`, outside OneDrive and outside AppData, because Microsoft Store Python redirects writes under AppData. It also creates the local `.streamlit/secrets.toml`, which git ignores.
 - `.\dev.ps1 run`: starts the app at http://localhost:8501.
+- `.\dev.ps1 share`: runs the app and opens a temporary public link (a Cloudflare Quick Tunnel through `cloudflared`, no account needed) for remote users. The URL changes on every run. Logs are in `%USERPROFILE%\.ism_micmac\logs`. The share stops on Ctrl+C.
 - `.\dev.ps1 check`: runs a syntax check, `pip check` and `pytest`. These are the same checks GitHub Actions runs (`.github/workflows/tests.yml`).
 
 The local database lives in `%USERPROFILE%\.ism_micmac\ism_data.db`. The location is set through `ISM_DB_PATH` in the local secrets.
