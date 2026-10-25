@@ -93,6 +93,13 @@ def test_katz_distinguishes_saturated_frm():
     assert res['micmac_katz']['DP'].idxmax() == 'A'
 
 
+def test_classify_with_fixed_threshold():
+    dp = pd.Series({'a': 10, 'b': 3})
+    dep = pd.Series({'a': 1, 'b': 9})
+    cls = classify_micmac(dp, dep, threshold=8)['Classification']
+    assert cls['a'].startswith('Driving') and cls['b'].startswith('Dependent')
+
+
 def test_empty_influence_returns_zeros():
     irm = make_irm(['A', 'B'], [])
     dp, dep, _ = compute_katz_micmac(irm)

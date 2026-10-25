@@ -41,6 +41,10 @@ def parse_args():
     p.add_argument('--per-type', type=int, default=2, help='כמות סוכנים מכל סוג')
     p.add_argument('--out', default=os.path.join(ROOT, 'sim_runs'))
     p.add_argument('--dry-run', action='store_true', help='AI מדומה: בודק את התשתית בלי עלות ובלי רשת')
+    p.add_argument('--factors-file', help='קובץ JSON עם רשימת גורמים קבועה (מדלג על חקר הנושא), למשל להשוואה למאמר')
+    p.add_argument('--order', choices=['shuffled', 'fixed'], default='shuffled',
+                   help='סדר הזוגות בשאלון הסוכנים: אקראי לכל סוכן (ברירת מחדל) או קבוע לפי רשימת הגורמים')
+    p.add_argument('--tag', default='', help='תווית לשם תיקיית הריצה')
     return p.parse_args()
 
 
@@ -135,7 +139,7 @@ def main():
     if not args.dry_run and not api_key:
         sys.exit('לא נמצא ANTHROPIC_API_KEY ב-.streamlit/secrets.toml. הדבק את המפתח בשדה הייעודי והרץ שוב.')
 
-    stamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S') + ('_dry' if args.dry_run else '')
+    stamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S') + ('_dry' if args.dry_run else '') + (f'_{args.tag}' if args.tag else '')
     out_dir = os.path.join(args.out, stamp)
     os.makedirs(out_dir, exist_ok=True)
     os.environ['ISM_DB_PATH'] = os.path.join(out_dir, 'sim.db')
@@ -202,10 +206,14 @@ def main():
     print(f'הערכת עלות גסה: ${0.03 + total_agents * 0.07 + 0.2:.2f}-${0.1 + total_agents * 0.15 + 0.5:.2f}\n', flush=True)
     t_start = time.perf_counter()
 
-    # 1. גורמים
-    with stage('חקר נושא והמלצה על גורמים'):
-        recs, factor_cites = app._research_factors(args.topic, args.factors)
-    factors = [r['name'] for r in recs][:args.factors]
+    # 1. גורמים: מקובץ (רשימה קבועה, למשל מהספרות) או מחקר נושא של ה-AI
+    if args.factors_file:
+        factors, factor_cites = json.load(open(args.factors_file, encoding='utf8')), []
+        print(f'גורמים מקובץ: {len(factors)}', flush=True)
+    else:
+        with stage('חקר נושא והמלצה על גורמים'):
+            recs, factor_cites = app._research_factors(args.topic, args.factors)
+        factors = [r['name'] for r in recs][:args.factors]
     if len(factors) < 3:
         sys.exit(f'חקר הנושא החזיר רק {len(factors)} גורמים - עוצר.')
     app.st.session_state['FACTORS'] = factors
@@ -226,7 +234,8 @@ def main():
                 fails0 = stats['json_parse_failures']
                 t0 = time.perf_counter()
                 try:
-                    matrix, cites = app._simulate_synthetic_expert(role, factors)
+                    matrix, cites = app._simulate_synthetic_expert(role, factors, shuffle=(args.order == 'shuffled'),
+                                                                    seed=len(agent_runs) + 1)
                     app._inject_synthetic_data_or(role, matrix, factors, cites, instance_label=label)
                     answered = sum(len(v) for v in matrix.values())
                     ok, err = True, None
@@ -316,6 +325,8 @@ def main():
 
     report = {
         'run': stamp, 'dry_run': args.dry_run, 'model': app.ANTHROPIC_MODEL_NAME, 'effort': app.ANTHROPIC_EFFORT,
+        'order': args.order, 'factors_file': args.factors_file,
+        'agent_answers': {e['name']: e['responses'] for e in app.st.session_state['EXPERT_DATA'].values()},
         'topic': args.topic, 'factors': factors, 'factor_sources': factor_cites,
         'expert_roles': roles, 'agents': agent_runs, 'stages': stages,
         'totals': {'seconds': round(total_seconds, 1), 'ai_calls': usage['calls'],

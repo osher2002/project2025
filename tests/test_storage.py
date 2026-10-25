@@ -1,6 +1,13 @@
 import storage
 
 
+def test_init_creates_missing_folder(tmp_path):
+    db = str(tmp_path / "new" / "nested" / "t.db")
+    storage.init_db(db)
+    storage.save_settings({'TOPIC': 'x'}, db)
+    assert storage.load_settings(db) == {'TOPIC': 'x'}
+
+
 def test_settings_roundtrip(tmp_path):
     db = str(tmp_path / "t.db")
     storage.init_db(db)

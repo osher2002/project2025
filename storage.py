@@ -34,6 +34,8 @@ def _connect(db_path):
 
 
 def init_db(db_path=DEFAULT_DB_PATH):
+    folder = os.path.dirname(os.path.abspath(db_path))
+    os.makedirs(folder, exist_ok=True)  # ISM_DB_PATH may point to a folder that does not exist yet
     with closing(_connect(db_path)) as conn, conn:
         conn.executescript(_SCHEMA)
 

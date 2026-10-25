@@ -94,7 +94,8 @@ ANTHROPIC_PRICES = {
 ANTHROPIC_PRICE_INPUT_PER_M, ANTHROPIC_PRICE_OUTPUT_PER_M = ANTHROPIC_PRICES.get(ANTHROPIC_MODEL_NAME, (2.00, 10.00))
 # מודלים שתומכים ב-fallback בצד השרת (מריץ מחדש בקשה שנדחתה ע"י מסווגי הבטיחות על מודל חלופי)
 ANTHROPIC_SERVER_FALLBACK_MODELS = {"claude-sonnet-5-5", "claude-opus-5-5", "claude-opus-5", "claude-fable-5-1"}
-ANTHROPIC_MAX_TOKENS = 16000  # החשיבה נספרת בתוך max_tokens; תקרה נמוכה קוטעת תשובות JSON ארוכות של הסוכנים
+# החשיבה נספרת בתוך max_tokens; תקרה נמוכה קוטעת תשובות JSON ארוכות של הסוכנים (16 גורמים = 120 זוגות)
+ANTHROPIC_MAX_TOKENS = int(_get_secret("ANTHROPIC_MAX_TOKENS", "32000"))
 
 # נתוני ברירת מחדל
 DEFAULT_FACTORS = [
@@ -832,10 +833,14 @@ def _call_anthropic(full_prompt, system_context):
         messages=[{"role": "user", "content": full_prompt}],
     )
     started = time.perf_counter()
+    # streaming: an agent that answers 100+ pairs writes a long response, and a non-streamed request of that size
+    # risks the HTTP timeout; get_final_message() returns the same message object
     if ANTHROPIC_MODEL_NAME in ANTHROPIC_SERVER_FALLBACK_MODELS:
-        response = client.beta.messages.create(betas=["server-side-fallback-2026-07-01"], fallbacks="default", **params)
+        stream = client.beta.messages.stream(betas=["server-side-fallback-2026-07-01"], fallbacks="default", **params)
     else:
-        response = client.messages.create(**params)
+        stream = client.messages.stream(**params)
+    with stream as s:
+        response = s.get_final_message()
     elapsed = time.perf_counter() - started
 
     record_ai_usage(response.usage.input_tokens, response.usage.output_tokens,
@@ -1001,16 +1006,35 @@ def _get_ai_expert_recommendations(topic, factors, num_experts=3):
     data, _ = call_ai_json(prompt, "אתה יועץ אסטרטגי ל-ISM.", open_char='[', close_char=']', use_search=True)
     return data
 
-def _simulate_synthetic_expert(role_info, factors):
+FLIP = {'V': 'A', 'A': 'V', 'X': 'X', 'O': 'O'}
+
+def canonical_relation(fi, fj, relation, factors):
+    """
+    מחזיר (גורם ראשון, גורם שני, סימן) בסדר הגורמים של הפרויקט. אם הזוג הוצג או הוחזר הפוך (j לפני i),
+    הכיוון מתהפך: V ↔ A. בלי זה, תשובה על זוג הפוך הייתה נשמרת במקום שהאגרגציה אינה קוראת, ונספרת כ-O.
+    """
+    rel = str(relation or 'O').strip().upper()[:1]
+    rel = rel if rel in FLIP else 'O'
+    if factors.index(fi) > factors.index(fj):
+        return fj, fi, FLIP[rel]
+    return fi, fj, rel
+
+def _simulate_synthetic_expert(role_info, factors, shuffle=True, seed=None):
     """
     סימולציית סוכן AI עם חיפוש אינטרנטי.
     הפרומפט מפרט את הזוגות בשמותיהם המלאים (במקום סכמה עם דוגמת "V" שמודלים נוטים
     להעתיק כמעט לכל זוג), ומדגיש ש-O הוא ברירת המחדל הסטטיסטית - כדי למנוע מטריצות
     שבהן כמעט כל הזוגות מסומנים כבעלי קשר ישיר.
+    shuffle: הזוגות מוצגים בסדר אקראי ובכיוון אקראי (לכל סוכן אחרת), כדי שסדר רשימת הגורמים לא ישפיע על
+    כיוון הקשרים (השפעת סדר שנצפתה בסימולציה המלאה). התשובות מוחזרות לסדר הקנוני ב-canonical_relation.
     """
     role = role_info['role']
     n = len(factors)
     pairs = [(factors[i], factors[j]) for i in range(n) for j in range(i + 1, n)]
+    if shuffle:
+        rng = random.Random(seed)
+        pairs = [(b, a) if rng.random() < 0.5 else (a, b) for a, b in pairs]
+        rng.shuffle(pairs)
     pairs_list = "\n".join(f'{idx + 1}. "{fi}"  מול  "{fj}"' for idx, (fi, fj) in enumerate(pairs))
 
     prompt = f"""עליך להעריך קשר השפעה ישיר בין {len(pairs)} זוגות גורמים, זוג אחר זוג:
@@ -1040,10 +1064,11 @@ def _simulate_synthetic_expert(role_info, factors):
     matrix = {}
     for item in (data if isinstance(data, list) else []):
         fi, fj = item.get("factor_i"), item.get("factor_j")
-        if fi not in factors or fj not in factors:
+        if fi not in factors or fj not in factors or fi == fj:
             continue
+        fi, fj, rel = canonical_relation(fi, fj, item.get("relation", "O"), factors)
         matrix.setdefault(fi, {})[fj] = {
-            "relation": item.get("relation", "O"),
+            "relation": rel,
             "justification": item.get("justification", ""),
         }
     return matrix, citations
@@ -1428,7 +1453,8 @@ def build_excel_report():
                 for idx, lvl in enumerate(compute_ism_levels(frm)) for f in lvl
             ]).to_excel(writer, sheet_name='רמות_ISM', index=False)
 
-            for key, sheet in (('micmac', 'MICMAC_קלאסי'), ('micmac_godet', 'MICMAC_Godet'), ('micmac_katz', 'MICMAC_Katz')):
+            for key, sheet in (('micmac', 'MICMAC_קלאסי'), ('micmac_midpoint', 'MICMAC_קלאסי_סף_n2'),
+                               ('micmac_godet', 'MICMAC_Godet'), ('micmac_katz', 'MICMAC_Katz')):
                 results[key].sort_values('DP', ascending=False).to_excel(writer, sheet_name=sheet)
 
             pd.DataFrame([
@@ -1770,7 +1796,8 @@ def screen_admin_dashboard():
             st.markdown("---")
             st.markdown("### 📊 מפת MICMAC ויזואלית")
             method_labels = {
-                'classic': "ISM-MICMAC קלאסי (סכומי FRM)",
+                'classic': "ISM-MICMAC קלאסי (סכומי FRM, סף: ממוצע)",
+                'classic_mid': f"ISM-MICMAC קלאסי (סף: אמצע הסולם n/2 = {len(results['frm']) / 2:g}, כמקובל בספרות)",
                 'godet': f"MICMAC עקיף - Godet (חזקת מטריצה {results['godet_power']})",
                 'katz': f"MICMAC עקיף מצטבר - Katz (α={results['katz_alpha']:.3g})",
             }
@@ -1778,7 +1805,7 @@ def screen_admin_dashboard():
                 "שיטת חישוב ההשפעה והתלות",
                 options=list(method_labels.keys()),
                 format_func=method_labels.get,
-                index=2 if results['classic_degenerate'] else 0,
+                index=3 if results['classic_degenerate'] else 0,
                 horizontal=True,
                 key="micmac_method",
             )
@@ -1788,7 +1815,11 @@ def screen_admin_dashboard():
                 st.caption("ערכי DP/DEP בשיטה זו הם אחוז מסך ההשפעה במערכת (מחושב מחזקות מטריצת ההשפעה הישירה עד להתייצבות הדירוג). במעגל השפעה קצר החזקה הבודדת עלולה להתנודד - במקרה כזה עדיפה שיטת Katz.")
             elif method == 'katz':
                 st.caption("ערכי DP/DEP בשיטה זו הם אחוז מסך ההשפעה במערכת, מחושב מסכום כל המסלולים: Σ α^k·M^k = (I − αM)⁻¹ − I, כאשר α = 0.5/ρ(M). מסלול ארוך מקבל משקל קטן יותר, ואין תנודות במעגלים קצרים.")
-            micmac = results[{'classic': 'micmac', 'godet': 'micmac_godet', 'katz': 'micmac_katz'}[method]]
+            elif method == 'classic_mid':
+                st.caption("הסף הוא אמצע הסולם (n/2) לשני הצירים, כמו ברוב מאמרי ה-ISM. בסף הממוצע הסיווג מותאם להתפלגות בפועל; "
+                           "בבדיקה מול Ahmad et al. (2019) הסף n/2 שחזר את כל 16 הסיווגים שפורסמו, והסף הממוצע 8 מהם.")
+            micmac = results[{'classic': 'micmac', 'classic_mid': 'micmac_midpoint', 'godet': 'micmac_godet',
+                              'katz': 'micmac_katz'}[method]]
             fig = plot_interactive_micmac(micmac)
             st.plotly_chart(fig, width="stretch")
 

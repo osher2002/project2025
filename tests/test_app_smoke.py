@@ -53,7 +53,7 @@ def test_expert_answers_reach_admin_and_analysis_runs(new_session):
     assert any("מומחה בדיקה" in str(df.value.to_dict()) for df in admin.dataframe)
 
     method = next(r for r in admin.radio if r.key == "micmac_method")
-    assert len(method.options) == 3
+    assert len(method.options) == 4
     method.set_value("katz").run()
     assert not admin.exception, admin.exception
     assert len(admin.get("download_button")) == 2

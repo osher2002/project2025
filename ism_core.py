@@ -52,10 +52,14 @@ def ism_cycle_members(frm_df):
     return {f for f, row in zip(frm_df.index, mutual) if row.any()}
 
 
-def classify_micmac(dp, dep):
-    """מסווג כל גורם לרביע MICMAC לפי השוואה לממוצע ההשפעה (DP) והתלות (DEP)."""
+def classify_micmac(dp, dep, threshold=None):
+    """
+    מסווג כל גורם לרביע MICMAC לפי השוואה לסף ההשפעה (DP) והתלות (DEP).
+    threshold=None: הממוצע בפועל של DP ושל DEP (ברירת המחדל במערכת). מספר: סף קבוע לשני הצירים, למשל n/2
+    (אמצע הסולם, המקובל בספרות ה-ISM; כך שוחזרו תוצאות Ahmad et al., 2019 במלואן).
+    """
     micmac = pd.DataFrame({'DP': dp, 'DEP': dep})
-    avg_dp, avg_dep = dp.mean(), dep.mean()
+    avg_dp, avg_dep = (dp.mean(), dep.mean()) if threshold is None else (threshold, threshold)
 
     def classify(row):
         d, p = row['DP'], row['DEP']
@@ -150,6 +154,7 @@ def build_analysis_results(irm, frm_df, micmac):
         'irm': irm,
         'frm': frm_df,
         'micmac': micmac,
+        'micmac_midpoint': classify_micmac(micmac['DP'], micmac['DEP'], threshold=n / 2),
         'micmac_godet': classify_micmac(dp_g.round(1), dep_g.round(1)),
         'godet_power': power,
         'micmac_katz': classify_micmac(dp_k.round(1), dep_k.round(1)),

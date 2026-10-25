@@ -1,0 +1,18 @@
+[
+ "Earthquake magnitude (M)",
+ "Epicentral distance (S)",
+ "Duration of earthquake (t)",
+ "Peak ground acceleration (amax)",
+ "Fines content (Fc)",
+ "Soil type (Cu and Cc)",
+ "Mean particle size (D50)",
+ "Relative density (Dr)",
+ "Drainage condition (K)",
+ "Degree of consolidation (OCR)",
+ "SPT blow counts (SPT N-value)",
+ "Effective vertical stress (σ′v)",
+ "Groundwater table (Dw)",
+ "Depth of soil deposit (Ds)",
+ "Thickness of soil layer (h)",
+ "Liquefaction potential (LP)"
+]
