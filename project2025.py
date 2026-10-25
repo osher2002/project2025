@@ -1119,8 +1119,14 @@ def _call_ai_with_context(prompt, extra_context=""):
     if st.session_state.get('TOPIC'):
         ctx += f"נושא הבעיה: {st.session_state['TOPIC']}. "
     ctx += f"פרויקט נוכחי מכיל {len(st.session_state['FACTORS'])} גורמים: {', '.join(st.session_state['FACTORS'])}. "
-    ctx += f"מספר מומחים שהשיבו: {len(st.session_state['EXPERT_DATA'])}. "
+    n_synth = sum(1 for k in st.session_state['EXPERT_DATA'] if k.startswith('Synth_'))
+    n_human = len(st.session_state['EXPERT_DATA']) - n_synth
+    ctx += f"משיבים: {n_human} מומחים אנושיים ו-{n_synth} סוכני AI סינתטיים. "
+    if n_synth and not n_human:
+        ctx += "כל המשיבים הם סוכני AI, ולכן ציין שהתוצאות דורשות אימות מול מומחים אמיתיים. "
     ctx += "\n" + _analysis_summary_for_ai()
+    ctx += ("\nהערה לפרשנות: רוויית FRM היא שיעור הזוגות שבהם קיים מסלול השפעה ישיר או עקיף; ערך נמוך פירושו מבנה "
+            "היררכי מובחן, וערך קרוב ל-100% פירושו שכמעט כל הגורמים מגיעים זה לזה.")
     ctx += "\nהסתמך על התוצאות האלה כפי שהן; אל תמציא ערכים או סיווגים שאינם מופיעים בהן."
     if extra_context:
         ctx += f"\n הקשר ספציפי לבקשה זו: {extra_context}"
