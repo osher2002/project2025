@@ -35,7 +35,7 @@ sys.path.insert(0, ROOT)
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('--topic', default='הפחתת תאונות דרכים בישראל')
+    p.add_argument('--topic', default='שיפור זמני התגובה של משטרת ישראל לקריאות חירום במוקד 100')
     p.add_argument('--factors', type=int, default=8, help='כמות גורמים שה-AI ימליץ עליהם')
     p.add_argument('--expert-types', type=int, default=4, help='כמות סוגי מומחים')
     p.add_argument('--per-type', type=int, default=2, help='כמות סוכנים מכל סוג')
@@ -261,13 +261,43 @@ def main():
         with open(os.path.join(out_dir, 'ISM_Report.xlsx'), 'wb') as f:
             f.write(app.build_excel_report())
 
-    total_seconds = time.perf_counter() - t_start
-
-    # ---------------------------------------------------------------- איסוף מדדים
+    # 7. תמיכת החלטה: הדוחות של מחולל הדוחות ובדיקת האיכות, כמו בכפתורים בממשק
     from ism_core import compute_ism_levels, ism_cycle_members
     frm = results['frm']
     levels = compute_ism_levels(frm)
     cycles = ism_cycle_members(frm)
+    method_key = 'micmac_katz' if results['classic_degenerate'] else 'micmac'
+    drivers = [f for f, r in results[method_key].iterrows() if 'Driving' in r.Classification]
+    roots = levels[-1] if levels else []
+    decision = []
+    reports_dir = os.path.join(out_dir, 'decision_support')
+    os.makedirs(reports_dir, exist_ok=True)
+    with stage('תמיכת החלטה: דוחות AI ובדיקת איכות'):
+        jobs = [(t, lambda t=t: app.generate_ai_report(t)) for t in app.AI_REPORT_TYPES]
+        jobs.append(('בדיקת איכות נתונים', app.validate_expert_data_ai))
+        for idx, (name, fn) in enumerate(jobs, start=1):
+            t0 = time.perf_counter()
+            try:
+                text, err = fn(), None
+            except Exception as e:
+                text, err = '', str(e)
+                stats['errors'].append(f'{name}: {e}')
+            with open(os.path.join(reports_dir, f'{idx}_{name.replace(" ", "_")}.md'), 'w', encoding='utf-8') as f:
+                f.write(f'# {name}\n\n{text}\n')
+            decision.append({
+                'report': name, 'ok': err is None, 'error': err, 'seconds': round(time.perf_counter() - t0, 1),
+                'chars': len(text),
+                # עיגון: האם הדוח מתייחס לגורמים שהמערכת זיהתה כמניעים ולגורמי השורש של ההיררכיה
+                'drivers_mentioned': [d for d in drivers if d in text], 'drivers_total': len(drivers),
+                'roots_mentioned': [g for g in roots if g in text], 'roots_total': len(roots),
+                'factors_mentioned': sum(1 for g in factors if g in text), 'factors_total': len(factors),
+            })
+            print(f'    {"✓" if err is None else "✗"} {name}: {decision[-1]["seconds"]}s, {len(text)} תווים, '
+                  f'מניעים {len(decision[-1]["drivers_mentioned"])}/{len(drivers)}', flush=True)
+
+    total_seconds = time.perf_counter() - t_start
+
+    # ---------------------------------------------------------------- איסוף מדדים
     sym_stats = app.compute_expert_symbol_stats(factors).drop(columns=['_non_o_pct']).to_dict('records')
     pair_ratings = []
     for i, j in itertools.combinations(range(len(factors)), 2):
@@ -310,6 +340,7 @@ def main():
                     'godet_power': results['godet_power'], 'katz_alpha': round(results['katz_alpha'], 4)},
         'expert_symbol_stats': sym_stats,
         'judge_decisions': judge,
+        'decision_support': {'method': method_key, 'drivers': drivers, 'root_level': roots, 'reports': decision},
         'micmac': {'classic': micmac_rows('micmac'), 'godet': micmac_rows('micmac_godet'), 'katz': micmac_rows('micmac_katz')},
         'calls': history,
     }
@@ -355,6 +386,15 @@ def write_markdown(r, path):
     for key, title in (('katz', 'MICMAC מצטבר (Katz)'), ('classic', 'MICMAC קלאסי')):
         L += ['', f'### {title}', '', '| גורם | DP | DEP | סיווג |', '|---|---|---|---|']
         L += [f"| {m['factor']} | {m['DP']} | {m['DEP']} | {m['class']} |" for m in r['micmac'][key]]
+    ds = r['decision_support']
+    L += ['', '## תמיכת החלטה', '',
+          f"- גורמים מניעים לפי המערכת: {', '.join(ds['drivers']) or 'אין'}",
+          f"- גורמי השורש (הרמה העליונה בהיררכיה): {', '.join(ds['root_level'])}", '',
+          '| דוח | שניות | תווים | מניעים שאוזכרו | גורמי שורש שאוזכרו | גורמים שאוזכרו | תקין |', '|---|---|---|---|---|---|---|']
+    L += [f"| {d['report']} | {d['seconds']} | {d['chars']:,} | {len(d['drivers_mentioned'])}/{d['drivers_total']} | "
+          f"{len(d['roots_mentioned'])}/{d['roots_total']} | {d['factors_mentioned']}/{d['factors_total']} | {'✓' if d['ok'] else '✗ ' + (d['error'] or '')} |"
+          for d in ds['reports']]
+    L += ['', 'הדוחות המלאים בתיקייה `decision_support`.']
     L += ['', '## ביצועי מנוע החישוב (ללא AI)', '', '| גורמים | זוגות | שניות | רמות | רוויה |', '|---|---|---|---|---|']
     L += [f"| {b['factors']} | {b['pairs']} | {b['seconds']} | {b['levels']} | {b['saturation']} |" for b in r['offline_benchmark']]
     if rel['errors']:

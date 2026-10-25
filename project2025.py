@@ -1085,13 +1085,43 @@ def _inject_synthetic_data_or(role_info, matrix_data, factors, citations=[], ins
     sync_from_db()
     return synth_id
 
+def _analysis_summary_for_ai():
+    """
+    תקציר תוצאות הניתוח בפועל (רמות, MICMAC, גורמים מניעים, הכרעות) לשימוש כלי ה-AI, כדי שהדוחות וההמלצות
+    יישענו על מה שהמערכת חישבה ולא על ניחוש של המודל.
+    """
+    results = st.session_state.get('RESULTS')
+    if not results:
+        return "הניתוח טרם הורץ, ואין עדיין תוצאות."
+    frm = results['frm']
+    levels = compute_ism_levels(frm)
+    cycles = ism_cycle_members(frm)
+    method, key = (("MICMAC עקיף מצטבר (Katz)", 'micmac_katz') if results['classic_degenerate']
+                   else ("MICMAC קלאסי", 'micmac'))
+    micmac = results[key].sort_values('DP', ascending=False)
+    lines = [f"תוצאות הניתוח (שיטה: {method}; רוויית FRM: {results['saturation']:.0%}):",
+             "רמות ISM, מהתלוי ביותר (רמה 1) עד המניע ביותר:"]
+    lines += [f"  רמה {k + 1}: {', '.join(lvl)}" for k, lvl in enumerate(levels)]
+    if cycles:
+        lines.append(f"גורמים במעגל השפעה הדדי: {', '.join(sorted(cycles))}")
+    lines.append("MICMAC (DP = כוח השפעה, DEP = כוח תלות, סיווג):")
+    lines += [f"  {f}: DP={r.DP:g}, DEP={r.DEP:g}, {r.Classification}" for f, r in micmac.iterrows()]
+    drivers = [f for f, r in micmac.iterrows() if 'Driving' in r.Classification]
+    lines.append(f"הגורמים המניעים (Drivers): {', '.join(drivers) if drivers else 'אין גורם בסיווג מניע'}")
+    log = st.session_state.get('AI_LOG') or []
+    if log:
+        lines.append(f"קונפליקטים בין מומחים שהוכרעו: {len(log)}")
+    return "\n".join(lines)
+
 def _call_ai_with_context(prompt, extra_context=""):
-    """פונקציה מרכזית לבקשות AI עם הקשר אוטומטי של הפרויקט."""
+    """פונקציה מרכזית לבקשות AI עם הקשר אוטומטי של הפרויקט, כולל תוצאות הניתוח בפועל."""
     ctx = f"אתה יועץ אסטרטגי מומחה לניתוח ISM-MICMAC. "
+    if st.session_state.get('TOPIC'):
+        ctx += f"נושא הבעיה: {st.session_state['TOPIC']}. "
     ctx += f"פרויקט נוכחי מכיל {len(st.session_state['FACTORS'])} גורמים: {', '.join(st.session_state['FACTORS'])}. "
     ctx += f"מספר מומחים שהשיבו: {len(st.session_state['EXPERT_DATA'])}. "
-    if 'RESULTS' in st.session_state and st.session_state['RESULTS']:
-        ctx += "הניתוח הושלם וקיימות תוצאות MICMAC. "
+    ctx += "\n" + _analysis_summary_for_ai()
+    ctx += "\nהסתמך על התוצאות האלה כפי שהן; אל תמציא ערכים או סיווגים שאינם מופיעים בהן."
     if extra_context:
         ctx += f"\n הקשר ספציפי לבקשה זו: {extra_context}"
 
@@ -1122,14 +1152,29 @@ def _render_ai_chat():
     for msg in reversed(st.session_state.get("ai_chat_history", [])):
         st.chat_message(msg["role"]).markdown(msg["content"], unsafe_allow_html=True)
 
+AI_REPORT_TYPES = ["דוח מנהלים תמציתי", "דוח טכני מפורט", "המלצות התערבות אופטימליות"]
+
+def generate_ai_report(report_type):
+    """דוח תמיכת החלטה של ה-AI, על בסיס תוצאות הניתוח בפועל."""
+    prompt = (f"כתוב {report_type} עבור מערכת ה-ISM הנוכחית. כלול: תקציר מנהלים, גורמי מפתח (Drivers), "
+              "אזהרות סיכון, והמלצות מעשיות להשקעת משאבים. בסס כל המלצה על המיקום של הגורם בהיררכיה ועל סיווג ה-MICMAC שלו.")
+    return _call_ai_with_context(prompt, extra_context=f"סוג הדוח המבוקש: {report_type}")
+
+def validate_expert_data_ai():
+    """בדיקת איכות ועקביות של תשובות המומחים בעזרת ה-AI."""
+    prompt = ("נתח את איכות התשובות שנאספו מהמומחים. זהה: 1. סתירות לוגיות בין מומחים שונים. "
+              "2. גורמים שזכו להסכמה גורפת. 3. המלצות לשיפור איסוף הנתונים או ניסוח השאלות.")
+    stats = compute_expert_symbol_stats(st.session_state['FACTORS'])
+    table = stats.drop(columns=['_non_o_pct']).to_string(index=False) if not stats.empty else "אין"
+    return _call_ai_with_context(prompt, extra_context=f"התפלגות הסימנים לפי משיב:\n{table}")
+
 def _render_ai_report_generator():
     """מחולל דוח אסטרטגי אוטומטי."""
     st.markdown("#### 📄 מחולל דוח ניתוח אסטרטגי")
-    report_type = st.selectbox("בחר סוג דוח", ["דוח מנהלים תמציתי", "דוח טכני מפורט", "המלצות התערבות אופטימליות"])
+    report_type = st.selectbox("בחר סוג דוח", AI_REPORT_TYPES)
     if st.button("צור דוח עכשיו", key="btn_gen_report"):
         with st.spinner("📝 כותב דוח מקצועי..."):
-            prompt = f"כתוב {report_type} עבור מערכת ה-ISM הנוכחית. כלול: תקציר מנהלים, גורמי מפתח (Drivers), אזהרות סיכון, והמלצות מעשיות להשקעת משאבים."
-            report = _call_ai_with_context(prompt, extra_context=f"סוג הדוח המבוקש: {report_type}")
+            report = generate_ai_report(report_type)
             st.success("✅ הדוח חולל בהצלחה!")
             st.download_button("📥 הורד כקובץ טקסט", report, file_name="ISM_AI_Report.txt", mime="text/plain")
             st.markdown("---")
@@ -1145,8 +1190,7 @@ def _render_ai_data_validator():
             return
             
         with st.spinner(" מנתח עקביות והיגיון מערכתי..."):
-            prompt = "נתח את איכות התשובות שנאספו מהמומחים. זהה: 1. סתירות לוגיות בין מומחים שונים. 2. גורמים שזכו להסכמה גורפת. 3. המלצות לשיפור איסוף הנתונים או ניסוח השאלות."
-            validation_report = _call_ai_with_context(prompt, extra_context="נתוני מומחים קיימים במערכת.")
+            validation_report = validate_expert_data_ai()
             st.success("✅ ניתוח האיכות הושלם!")
             st.markdown(validation_report)
 
