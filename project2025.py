@@ -609,8 +609,8 @@ def is_ai_ready():
 def ai_provider_label():
     provider = st.session_state.get('AI_PROVIDER', 'openrouter')
     if provider == 'anthropic':
-        return f"Anthropic — {ANTHROPIC_MODEL_NAME} (effort: {ANTHROPIC_EFFORT})"
-    return f"OpenRouter — {AI_MODEL_NAME}"
+        return f"Anthropic: {ANTHROPIC_MODEL_NAME} (effort: {ANTHROPIC_EFFORT})"
+    return f"OpenRouter: {AI_MODEL_NAME}"
 
 # ==============================================================================
 # III. לוגיקה מתמטית (The Brain)
@@ -953,7 +953,7 @@ X = השפעה הדדית ישירה; O = אין השפעה ישירה ביני�
 {justs_text}
 
 קבע את ההכרעה הסופית לפי עוצמת הטיעונים ולא לפי מספרם בלבד.
-הערה: רק השפעה *ישירה* נחשבת - קשר עקיף דרך גורם שלישי, או מתאם כללי, מצדיקים O.
+הערה: רק השפעה *ישירה* נחשבת; קשר עקיף דרך גורם שלישי, או מתאם כללי, מצדיקים O.
 אם הטיעונים לקשר ישיר אינם משכנעים, בחר O. X רק כאשר יש טיעון משכנע לשני הכיוונים.
 החזר בדיוק בפורמט:
 RECOMMENDATION: <אחת מהאותיות V, A, X, O>
@@ -1047,7 +1047,7 @@ def _simulate_synthetic_expert(role_info, factors, shuffle=True, seed=None):
 - O: אין קשר השפעה ישיר וברור בין השניים.
 
 חשוב מאוד: ברוב המקרים אין קשר השפעה ישיר בין שני גורמים אקראיים. סמן V/A/X רק כאשר יש לכך
-הצדקה עניינית וברורה מתחום המומחיות שלך - אחרת סמן O. אל תסמן V/A/X בגלל קשר עקיף, קורלציה
+הצדקה עניינית וברורה מתחום המומחיות שלך; אחרת סמן O. אל תסמן V/A/X בגלל קשר עקיף, קורלציה
 כללית, או "יכול להיות שיש קשר כלשהו". צפי סביר הוא שרוב הזוגות יסומנו O.
 
 החזר אך ורק JSON (ללא טקסט נוסף לפני/אחרי, ללא ```), כרשימה שטוחה עם רשומה אחת לכל זוג
@@ -1099,7 +1099,7 @@ def _inject_synthetic_data_or(role_info, matrix_data, factors, citations=[], ins
                     "text": f"🤖 {reason}"
                 })
     
-    display_name = f"סוכן AI - {role_info['role']}"
+    display_name = f"סוכן AI: {role_info['role']}"
     if instance_label:
         display_name += f" {instance_label}"
     storage.save_expert(
@@ -1345,8 +1345,8 @@ def _render_ai_engine_tab():
     st.caption("המודל הנבחר משמש בכל מקום באפליקציה שבו מופעל AI: הכרעת קונפליקטים, סוכני מומחה סינתטיים, צ'אט חכם, מחולל דוחות ובדיקת איכות נתונים.")
 
     provider_options = {
-        'openrouter': "🆓 חינמי — OpenRouter (Gemma)",
-        'anthropic': f"⭐ בתשלום — Anthropic {ANTHROPIC_MODEL_NAME} (effort: {ANTHROPIC_EFFORT})",
+        'openrouter': "🆓 חינמי: OpenRouter (Gemma)",
+        'anthropic': f"⭐ בתשלום: Anthropic {ANTHROPIC_MODEL_NAME} (effort: {ANTHROPIC_EFFORT})",
     }
     current = st.session_state.get('AI_PROVIDER', 'openrouter')
     selected = st.radio(
@@ -1385,11 +1385,11 @@ def _render_ai_engine_tab():
     elif key_val:
         st.success("✅ מפתח Anthropic הוזן." + (" (עם Workspace ID)" if ws_val else ""))
     else:
-        st.warning("⚠️ לא הוזן מפתח Anthropic — נדרש לשימוש במודל בתשלום.")
+        st.warning("⚠️ לא הוזן מפתח Anthropic, והוא נדרש לשימוש במודל בתשלום.")
     st.caption(f"סטטוס OpenRouter (חינמי): {'✅ מוגדר' if AI_API_KEY != 'PLACEHOLDER' else '❌ חסר OPENROUTER_API_KEY ב-Secrets'}")
 
     st.markdown("---")
-    st.markdown("#### 📊 צריכה ועלות — מודל בתשלום (בזמן אמת)")
+    st.markdown("#### 📊 צריכה ועלות של המודל בתשלום (בזמן אמת)")
     _render_ai_usage_live()
     if st.button("🔄 אפס מונה צריכה", key="btn_reset_usage"):
         st.session_state['AI_USAGE'] = {'calls': 0, 'input_tokens': 0, 'output_tokens': 0, 'cost': 0.0, 'history': []}
